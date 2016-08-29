@@ -1,37 +1,20 @@
+extern crate libc;
+
 mod constants;
 mod usage;
-mod empd;
+mod epmd;
 mod enode;
+mod daemon;
 
 pub use usage::display_usage;
 
-// TODO:
-// IMPLEMENT
-// FROM: http://www.thegeekstuff.com/2012/02/c-daemon-process
-// Daemon Process Design:
-// A daemon process can be developed just like any other process but there is
-// one thing that differentiates it with any other normal process ie having no
-// controlling terminal. This is a major design aspect in creating a daemon
-// process.
-// This can be achieved by :
-//    Create a normal process (Parent process)
-//    Create a child process from within the above parent process
-//    The process hierarchy at this stage looks like:
-//        TERMINAL -> PARENT PROCESS -> CHILD PROCESS
-//    Terminate the the parent process.
-//    The child process now becomes orphan and is taken over by the init process.
-//    Call setsid() fn to run the process in new session and have a new group.
-//    After the above step we can say that now this process becomes a daemon
-//    process without having a controlling terminal.
-//    Change the working directory of the daemon process to root and close
-//    stdin, stdout and stderr file descriptors.
-//    Let the main logic of daemon process run.
-//
-// Can look here as well:
-// http://www.netzmafia.de/skripten/unix/linux-daemon-howto.html
-pub fn run_daemon () {
-    // Fork and sure that the child is not a process group leader
-
+#[cfg(unix)]
+pub fn run_daemon() {
+    daemon::run_daemon_unix();
+}
+#[cfg(windows)]
+pub fn run_daemon() {
+    daemon::run_daemon_win();
 }
 
 pub fn get_address() -> String {
