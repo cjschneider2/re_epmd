@@ -74,8 +74,8 @@ const EPMD_STOP_REQ: u8 = 115; // 's'
 // If no activity we let select() return every IDLE_TIMEOUT second
 // A file descriptor that has been idle for CLOSE_TIMEOUT seconds and
 // isn't an ALIVE socket has probably hanged and should be closed
-const IDLE_TIMEOUT: u8  = 5;
-const CLOSE_TIMEOUT: u8 = 60;
+const IDLE_TIMEOUT: usize  = 5;
+pub const CLOSE_TIMEOUT: usize = 60;
 
 // We save the name of nodes that are unregistered. If a new
 // node register the name we want to increment the "creation",
@@ -84,16 +84,32 @@ const CLOSE_TIMEOUT: u8 = 60;
 const MAX_UNREG_COUNT: usize       = 1000;
 const DEBUG_MAX_UNREG_COUNT: usize = 5;
 
-// Maximum length of a node name == atom name
-// 255 characters; UTF-8 encoded -> max 255*4
-const MAXSYMLEN: usize = (255*4);
+// Maximum length of a node name == atom name is 255 characters;
+// encoded in UTF-8 this gives a max of (255*4) or 1020 bytes.
+const MAX_SYM_LEN: usize = 1020;
+// NOTE: Since this is just the name as an atom, which is utf8, then
+// we can just set this to the max atom length in Erlang, which is:
+const MAX_ATOM_LEN: usize = 255;
 
 pub const MAX_LISTEN_SOCKETS: usize = 16;
+
+/* TODO/NOTE: Decide on the maximum number of socket connections
+This is apparently a strangely hard to define parameter between different
+platforms... This is set once as less than `libc::FD_SETSIZE` if it exists,
+or `MAX_FILE` which is defined in the constants...
+so, MAX_FILE is defined here to be 2048, which the default for FD_SETSIZE
+can, theoretically, be user defined but is set in the Unix's to 1024, which
+is probably the limit that most people will use. We can go looking for a
+value with ENV_VAR && with libc::FD_SETSIZE, but the default of 1024 should
+be fine... I hope...
+ */
+//const MAX_FILE: usize = 2048;
+pub const MAX_FILE_DESCRIPTORS: usize = 1024;
 
 // Largest request: ALIVE2_REQ
 //     2 + 13 + 2*MAXSYMLEN
 // Largest response: PORT2_RESP
 //     2 + 14 + 2*MAXSYMLEN
 // That is, 3*MAXSYMLEN should be large enough
-const INBUF_SIZE: usize  = (3*MAXSYMLEN);
-const OUTBUF_SIZE: usize = (3*MAXSYMLEN);
+const INBUF_SIZE:  usize = (3 * MAX_SYM_LEN);
+const OUTBUF_SIZE: usize = (3 * MAX_SYM_LEN);

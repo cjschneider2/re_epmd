@@ -1,15 +1,21 @@
 static USAGE_TEXT:&'static str = "
-usage: epmd [-d|-debug] [DbgExtra...] [-address List]
+usage:
+    Starting the port mapper daemon:
+       epmd [-d|-debug] [DbgExtra...] [-address List]
             [-port No] [-daemon] [-relaxed_command_check]
-       epmd [-d|-debug] [-port No] [-names|-kill|-stop name]
+
+    Communicating with a running port mapper daemon:
+       epmd [-d|-debug]
+       epmd [-port <number>]
+       epmd [-names|-kill|-stop name]
 
 See the Erlang epmd manual page for info about the usage.
 
 Regular options
-    -address List
+    -address <list>
         Let epmd listen only on the comma-separated list of IP
-        addresses (and on the loopback interface
-    -port No
+        addresses (and on the loopback interface)
+    -port <number>
         Let epmd listen to another port than default %d
     -d
     -debug
@@ -26,16 +32,16 @@ Regular options
         Also allows forced unregister (epmd -stop).
 
 DbgExtra options
-    -packet_timeout Seconds
+    -packet_timeout <seconds>
         Set the number of seconds a connection can be
         inactive before epmd times out and closes the
         connection (default 60).
-    -delay_accept Seconds
+    -delay_accept <seconds>
         To simulate a busy server you can insert a
         delay between epmd gets notified about that
         a new connection is requested and when the
         connections gets accepted.
-    -delay_write Seconds
+    -delay_write <seconds>
         Also a simulation of a busy server. Inserts
         a delay before a reply is sent.
 

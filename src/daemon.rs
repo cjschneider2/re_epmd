@@ -1,34 +1,41 @@
 use libc;
 use std::mem;
 
+use epmd::Epmd;
+
 /// Starts a new epmd daemon process
 ///
 /// The design of making a daemon process is taken from the following resources
 /// and is summarized below.
 ///
-/// FROM: http://www.thegeekstuff.com/2012/02/c-daemon-process
+/// FROM: [1]
 /// Daemon Process Design:
 /// A daemon process can be developed just like any other process but there is
 /// one thing that differentiates it with any other normal process ie having no
 /// controlling terminal. This is a major design aspect in creating a daemon
 /// process.
+///
 /// This can be achieved by :
-///    Create a normal process (Parent process)
-///    Create a child process from within the above parent process
+///  * Create a normal process (Parent process).
+///  * Create a child process from within the above parent process.
 ///    The process hierarchy at this stage looks like:
 ///        TERMINAL -> PARENT PROCESS -> CHILD PROCESS
-///    Terminate the the parent process.
-///    The child process now becomes orphan and is taken over by the init process.
-///    Call setsid() fn to run the process in new session and have a new group.
+///  * Terminate the the parent process.
+///  * The child process is now orphaned and is taken over by the init process.
+///  * Call setsid() fn to run the process in new session and have a new group.
 ///    After the above step we can say that now this process becomes a daemon
 ///    process without having a controlling terminal.
-///    Change the working directory of the daemon process to root and close
+///  * Change the working directory of the daemon process to root and close
 ///    stdin, stdout and stderr file descriptors.
 ///    Let the main logic of daemon process run.
 ///
-/// You can look here as well for some other information.
-/// http://www.netzmafia.de/skripten/unix/linux-daemon-howto.html
-pub fn run_daemon_unix () {
+/// CITATIONS:
+/// [1] : http://www.thegeekstuff.com/2012/02/c-daemon-process
+/// [2] : http://www.netzmafia.de/skripten/unix/linux-daemon-howto.html
+/// [3] : https://www.gnu.org/software/libc/manual/html_node/Termination-Internals.html#Termination-Internals
+
+pub fn run_daemon_unix (mut epmd: Epmd) {
+
     // create the parent process
     // NOTE: For the `fork()` call:
     //  * The child has a return value of 0
@@ -44,12 +51,12 @@ pub fn run_daemon_unix () {
     // Become the session leader
     // NOTE: for the `setsid()` call:
     //  * Returns new process group ID if successful
-    //  * Returns `(pid_t)-1`, i.e. -1:i32, and sets `ERRNO`
+    //  * Returns `(pid_t) -1`, i.e. -1:i32, and sets `ERRNO`
     let sid = unsafe { libc::setsid() };
     if  sid < 0 { panic!("epmd: Can't `setsid()`"); }
 
     // NOTE: This next part comes from the process termination process.
-    // FROM: https://www.gnu.org/software/libc/manual/html_node/Termination-Internals.html#Termination-Internals
+    // FROM: [3]
     //   "If the process is a session leader that has a controlling terminal,
     //    then a SIGHUP signal is sent to each process in the foreground job,
     //    and the controlling terminal is disassociated from that session.
@@ -61,7 +68,7 @@ pub fn run_daemon_unix () {
     match child_pid {
         -1 => panic!("Erlang mapper daemon can't complete second fork"),
         0  => return, // Parent should exit
-        _  => () // continue
+        _  => ()      // continue
     }
 
     // Move our current working directory to root;
@@ -72,8 +79,9 @@ pub fn run_daemon_unix () {
     };
     if chdir < 0 { panic!("epmd: `chdir()` failed"); }
 
-    // Clear all file rights to this process as the process's file mode
-    // creation mask is inherited after a call to `fork()`
+    // Set the `umask` to `0` which means that this process's file permissions
+    // are determined by the system; This need to be changed because the
+    // process's file mode creation mask is inherited after a call to `fork()`
     unsafe { libc::umask(0); }
 
     // Close all open file handles;
@@ -87,16 +95,30 @@ pub fn run_daemon_unix () {
         }
     }
 
-    // TODO: Close `syslog` on linux with `closelog()`
+    // Close the `syslog` with `closelog()`; in case it was opened
+    unsafe { libc::closelog() };
 
-    // TODO: Figure out why the following was done in the c-code
-    // open("/dev/null", O_RDONLY); // order important?!
-    // open("/dev/null", O_WRONLY);
-    // open("/dev/null", O_WRONLY);
+    // So, as we've closed all of our file descriptors, and in a single thread,
+    // we set `stdin`, `stdout`, and `stderr` to read, write, and write to/from
+    // `/dev/null` respectively; in this case the order _is_ important.
+    // NOTE:
+    //   This is because the POSIX standard file descriptors are defined
+    //   as 0, 1, & 2 in for std-in, -out, and -err respectively.
+    unsafe {
+        let dev_null: *const i8  = mem::transmute("/dev/null".as_ptr());
+        libc::open(dev_null, libc::O_RDONLY);
+        libc::open(dev_null, libc::O_WRONLY);
+        libc::open(dev_null, libc::O_WRONLY);
+    }
 
-    // TODO: orig: `errno = 0;`
+    // Set the `errno` value to zero just in case it was set by any of
+    // `open` system calls.
+    unsafe {
+        let errno = libc::__errno_location();
+        *errno = 0;
+    }
 
-    // TODO: orig: `run(g);`
+    epmd.run();
 }
 
 // TODO: Write the windows version of this function
