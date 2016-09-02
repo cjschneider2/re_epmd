@@ -5,9 +5,12 @@
 /// [2]: https://lists.fedoraproject.org/pipermail/devel/2010-July/139135.html
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::str::FromStr;
+use std::mem::uninitialized;
+
+use libc;
 
 use super::run_daemon;
 use connection::Connection;
@@ -30,16 +33,23 @@ pub struct Epmd {
     pub address: String,
     pub port: u16,
     // -- program constants --
-    max_conn: usize,
+    pub max_conn: usize,
     // TODO: active_conn & listen_fd maybe could be combined into a Vec<fd>
-    active_conn: usize,
-    listen_fd: [i32; MAX_LISTEN_SOCKETS],
+    pub active_conn: usize,
+    pub listen_fd: [i32; MAX_LISTEN_SOCKETS],
     // -- program data --
-    nodes: HashSet<ErlNode>,
-    conn: Vec<Connection>,
+    pub nodes: HashSet<ErlNode>,
+    pub conn: Vec<Connection>,
     // -- currently unused --
-    //select_fd_top: usize, // what is this?
+    pub select_fd_top: usize, // what is this?
+    pub orig_read_mask: libc::fd_set,
 }
+
+
+#[cfg(target_pointer_width = "32")]
+const POINTER_BITS:usize = 32;
+#[cfg(target_pointer_width = "64")]
+const POINTER_BITS:usize = 64;
 
 impl Epmd {
     pub fn new () -> Epmd {
@@ -65,6 +75,9 @@ impl Epmd {
             // -- program data --
             nodes: HashSet::<ErlNode>::new(),
             conn: Vec::<Connection>::new(),
+            // -- currently unused --
+            select_fd_top: 0,
+            orig_read_mask: unsafe { uninitialized() },
         }
     }
 
@@ -80,36 +93,81 @@ impl Epmd {
 
     pub fn run (&mut self) {
 
-        let mut socket_addrs: Vec<SocketAddr> = Vec::new();
-
         /* TODO: systemd related initialization...
         epmd does some querying of the system though systemd if it's available.
         namely using `sd_listen_fds(0)` To get the max # of sockets of the
         system. [2] has a decent way to go about using systemd to find the
         start of the socket counters in this way. This is set elsewhere so I'll
         just ignore this for now. ( the max will just be `MAX_FILE_DESCRIPTORS` )
+
+        IDEA?: maybe put all of the systemd functions into it's own module?
         */
 
-        // Initialize listening port
-        if !self.address.is_empty() && !self.address.contains(",") {
-            // Always join the loopback address
-            let loop_addr_v4 = Ipv4Addr::new(127, 0, 0, 0);
-            let loop_sock_v4 = SocketAddrV4::new(loop_addr_v4, self.port);
-            socket_addrs.push(SocketAddr::V4(loop_sock_v4));
+        let addrs = parse_socket_addrs(&self.address, self.port, self.use_ipv6);
+        let num_sockets = addrs.len();
 
-            if self.use_ipv6 {
-                let loop_addr_v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
-                let loop_sock_v6 =
-                    SocketAddrV6::new(loop_addr_v6, self.port, 0, 0);
-                socket_addrs.push(SocketAddr::V6(loop_sock_v6));
+        if num_sockets >= MAX_LISTEN_SOCKETS {
+            panic!("Cannot listen on more than {} IP Addresses",
+                   MAX_LISTEN_SOCKETS);
+        }
+
+        if cfg!(all(unix)) {
+            ignore_sig_pipe();
+        }
+
+        // Initialize the number of active file descriptors;
+        // `stdin`, `stdout`, & `stderr` are still open.
+        self.active_conn = 3 + num_sockets;
+        self.max_conn -= num_sockets;
+
+        // Initialize variables for select()
+        self.init_select_vars();
+
+        // Setup file descriptors
+        let mut listen_sock: [i32; MAX_LISTEN_SOCKETS] = [0; MAX_LISTEN_SOCKETS];
+        if self.is_systemd {
+            // for idx in (0..num_sockets) {
+            //     `select_fd_set(self, listensock[i])`
+            //}
+            unimplemented!()
+        } else {
+            // TODO: maybe this could be reduce by using `addrs` as an iterator?
+            for idx in 0..num_sockets {
+                let sock_family = match addrs[idx] {
+                    SocketAddr::V4(_) => libc::AF_INET,
+                    SocketAddr::V6(_) => libc::AF_INET6
+                };
+                listen_sock[idx] = unsafe{
+                    libc::socket(sock_family, libc::SOCK_STREAM, 0)
+                };
+                if listen_sock[idx] < 0 {
+                    // TODO: Read `errno` to identify the error
+                    // IDEA: this read `errno` function should also be a part of
+                    // the libc_utilities module...
+                }
+            }
+            // TODO: `g->listenfd[bound++] = listensock[i];`
+
+            // TODO: `setsockopt` for `IPV6_V6ONLY` if `HAVE_DECL_IPV6_ONLY` is
+            // selected as a compile time option -> translate into a feature
+            // flag for cargo.
+
+            // Set `SO_REUSEADDR` on all non-windows platforms;
+            // On windows, if this is set the addresses will be reused even if
+            // they are already in use. (behavior difference)
+            if !cfg!(target_os = "windows") {
+                // TODO: From C:
+                //opt = 1;
+                //if ( setsockopt(listensock[i], SOL_SOCKET,
+                //                SO_REUSEADDR, &opt, sizeof(opt) < 0)){
+                //    /* check error */
+                //}
+                unimplemented!()
             }
 
-            // Parse the rest of the addresses given to us in the configuration
-            let addrs: Vec<_> = self.address.split("")
-                .filter_map(|addr| SocketAddr::from_str(addr).ok())
-                .collect();
+            // TODO: this is line 406 or so in `epmd_srv.c`
 
-
+            unimplemented!()
         }
 
         unimplemented!();
@@ -124,6 +182,69 @@ impl Epmd {
         run_daemon(self);
     }
 
+    fn init_select_vars(&mut self) {
+        // TODO:
+        // Factor all of the select / fd_set stuff into it's own module
+        // to put all of the unsafe code in one place.
+        //
+        // maybe call it `libc_utilities.rs` and include `ignore_sig_pipe()`
+        // in with that file...
+        unsafe {
+            libc::FD_ZERO(&mut self.orig_read_mask);
+        }
+        self.select_fd_top = 0;
+    }
+
+
+}
+
+/// Ignore the SIGPIPE signal that is raised when we call write
+/// twice on a socket closed by the other end.
+fn ignore_sig_pipe () {
+    use libc::{signal, SIGPIPE, SIG_IGN};
+    unsafe { signal(SIGPIPE, SIG_IGN); }
+}
+
+fn parse_socket_addrs (
+    addr_str: &str, port: u16, use_ipv6: bool
+) -> Vec<SocketAddr> {
+    let mut socket_addrs: Vec<SocketAddr> = Vec::new();
+
+    // If we have an address list then we'll use it;
+    if !addr_str.is_empty() && !addr_str.contains(",") {
+
+        // Always join the loopback address
+        let loop_addr_v4 = Ipv4Addr::new(127, 0, 0, 0);
+        let loop_sock_v4 = SocketAddrV4::new(loop_addr_v4, port);
+        socket_addrs.push(SocketAddr::V4(loop_sock_v4));
+
+        if use_ipv6 {
+            let loop_addr_v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
+            let loop_sock_v6 =
+                SocketAddrV6::new(loop_addr_v6, port, 0, 0);
+            socket_addrs.push(SocketAddr::V6(loop_sock_v6));
+        }
+
+        // Parse the rest of the addresses given to us in the configuration
+        let mut addrs: Vec<_> = addr_str.split("")
+            .filter_map(|addr| SocketAddr::from_str(addr).ok())
+            .collect();
+
+        socket_addrs.append(&mut addrs);
+    } else { // just listen on any address...
+        let loop_addr_v4 = Ipv4Addr::new(0, 0, 0, 0);
+        let loop_sock_v4 = SocketAddrV4::new(loop_addr_v4, port);
+        socket_addrs.push(SocketAddr::V4(loop_sock_v4));
+
+        if use_ipv6 {
+            let loop_addr_v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
+            let loop_sock_v6 =
+                SocketAddrV6::new(loop_addr_v6, port, 0, 0);
+            socket_addrs.push(SocketAddr::V6(loop_sock_v6));
+        }
+    }
+
+    socket_addrs
 }
 
 fn get_address() -> String {
