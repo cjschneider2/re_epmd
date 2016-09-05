@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports, unused_variables)]
 
 /// Citations:
 /// [1]: https://msdn.microsoft.com/en-us/library/windows/desktop/ms741563.aspx
@@ -7,8 +7,15 @@
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::TcpListener;
+use std::net::ToSocketAddrs;
 use std::str::FromStr;
 use std::mem::uninitialized;
+
+
+use net2::TcpBuilder;
+use net2::TcpListenerExt;
+use net2::unix::UnixTcpBuilderExt;
 
 use libc;
 
@@ -205,46 +212,73 @@ fn ignore_sig_pipe () {
     unsafe { signal(SIGPIPE, SIG_IGN); }
 }
 
+/// Creates a list of listening sockets from which we can call select on and
+/// check for incoming connections.
+fn create_listen_sockets_from_addrs (
+    in_socks: Vec<SocketAddr>
+) -> Vec<TcpListener> {
+    let sockets = Vec::<TcpListener>::new();
+    sockets
+}
+
+/// `parse_socket_addrs` assumes that the addresses are given in the forms of:
+///    "192.168.1.1"
+///    "192.168.1.1, 10.0.0.1"
+///    "192.168.1.1 10.0.0.1"
+/// or their ipv6 counterparts and sets the listen port to the parameter value.
 fn parse_socket_addrs (
     addr_str: &str, port: u16, use_ipv6: bool
 ) -> Vec<SocketAddr> {
     let mut socket_addrs: Vec<SocketAddr> = Vec::new();
-
     // If we have an address list then we'll use it;
-    if !addr_str.is_empty() && !addr_str.contains(",") {
-
+    if !addr_str.is_empty() {
         // Always join the loopback address
-        let loop_addr_v4 = Ipv4Addr::new(127, 0, 0, 0);
-        let loop_sock_v4 = SocketAddrV4::new(loop_addr_v4, port);
-        socket_addrs.push(SocketAddr::V4(loop_sock_v4));
-
-        if use_ipv6 {
-            let loop_addr_v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
-            let loop_sock_v6 =
-                SocketAddrV6::new(loop_addr_v6, port, 0, 0);
-            socket_addrs.push(SocketAddr::V6(loop_sock_v6));
-        }
-
+        socket_addrs.push(get_loopback_address(port, use_ipv6));
         // Parse the rest of the addresses given to us in the configuration
-        let mut addrs: Vec<_> = addr_str.split("")
-            .filter_map(|addr| SocketAddr::from_str(addr).ok())
+        let mut addrs: Vec<_> =
+            addr_str
+            .split(|c| c == ',' || c == ' ')
+            .filter_map(|addr| {
+                if let Ok(_a) = addr.parse::<Ipv4Addr>() {
+                    let _v4 = SocketAddrV4::new(_a, port);
+                    Some(SocketAddr::V4(_v4))
+                } else if let Ok(_a) = addr.parse::<Ipv6Addr>() {
+                    let _v6 = SocketAddrV6::new(_a, port, 0, 0);
+                    Some(SocketAddr::V6(_v6))
+                } else {
+                    None
+                }
+            })
             .collect();
-
         socket_addrs.append(&mut addrs);
     } else { // just listen on any address...
-        let loop_addr_v4 = Ipv4Addr::new(0, 0, 0, 0);
-        let loop_sock_v4 = SocketAddrV4::new(loop_addr_v4, port);
-        socket_addrs.push(SocketAddr::V4(loop_sock_v4));
-
-        if use_ipv6 {
-            let loop_addr_v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
-            let loop_sock_v6 =
-                SocketAddrV6::new(loop_addr_v6, port, 0, 0);
-            socket_addrs.push(SocketAddr::V6(loop_sock_v6));
-        }
+        socket_addrs.push(get_any_address(port, use_ipv6));
     }
-
     socket_addrs
+}
+
+fn get_loopback_address(port: u16, use_ipv6: bool) -> SocketAddr {
+    if use_ipv6 {
+        let _v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
+        let _v6 = SocketAddrV6::new(_v6, port, 0, 0);
+        SocketAddr::V6(_v6)
+    } else {
+        let _v4 = Ipv4Addr::new(127, 0, 0, 1);
+        let _v4 = SocketAddrV4::new(_v4, port);
+        SocketAddr::V4(_v4)
+    }
+}
+
+fn get_any_address(port: u16, use_ipv6: bool) -> SocketAddr {
+    if use_ipv6 {
+        let _v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
+        let _v6 = SocketAddrV6::new(_v6, port, 0, 0);
+        SocketAddr::V6(_v6)
+    } else {
+        let _v4 = Ipv4Addr::new(0, 0, 0, 0);
+        let _v4 = SocketAddrV4::new(_v4, port);
+        SocketAddr::V4(_v4)
+    }
 }
 
 fn get_address() -> String {
@@ -271,5 +305,106 @@ fn check_relaxed() -> bool {
     match var("ERL_EPMD_RELAXED_COMMAND_CHECK") {
         Ok(_)  => true,
         Err(_) => false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::net::{Ipv6Addr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+    use super::parse_socket_addrs;
+    use super::get_any_address;
+    use super::get_loopback_address;
+
+    #[test]
+    fn test_parse_socket_addrs_blank () {
+        let test_str = "";
+        let use_ipv6 = false;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res[0], get_any_address(0x1234, use_ipv6));
+        assert_eq!(res.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_socket_addrs_blank_ipv6 () {
+        let test_str = "";
+        let use_ipv6 = true;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res[0], get_any_address(0x1234, use_ipv6));
+        assert_eq!(res.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_socket_addrs_just_commas () {
+        let test_str = ",,,";
+        let use_ipv6 = false;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res[0], get_loopback_address(0x1234, use_ipv6));
+        assert_eq!(res.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_socket_addrs_just_commas_ipv6 () {
+        let test_str = ",,,";
+        let use_ipv6 = true;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res[0], get_loopback_address(0x1234, use_ipv6));
+        assert_eq!(res.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_socket_addrs_space_seperators () {
+        let test_str = "123.123.123.123 234.234.234.234";
+        let addr1 = SocketAddr::V4(
+            SocketAddrV4::new(Ipv4Addr::new(123,123,123,123), 0x1234));
+        let addr2 = SocketAddr::V4(
+            SocketAddrV4::new(Ipv4Addr::new(234,234,234,234), 0x1234));
+        let use_ipv6 = false;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res[0], get_loopback_address(0x1234, use_ipv6));
+        assert_eq!(res[1], addr1);
+        assert_eq!(res[2], addr2);
+        assert_eq!(res.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_socket_addrs_comma_seperators () {
+        let test_str = "123.123.123.123, 234.234.234.234";
+        let addr1 = SocketAddr::V4(
+            SocketAddrV4::new(Ipv4Addr::new(123,123,123,123), 0x1234));
+        let addr2 = SocketAddr::V4(
+            SocketAddrV4::new(Ipv4Addr::new(234,234,234,234), 0x1234));
+        let use_ipv6 = false;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res[0], get_loopback_address(0x1234, use_ipv6));
+        assert_eq!(res[1], addr1);
+        assert_eq!(res[2], addr2);
+        assert_eq!(res.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_socket_addrs_comma_seperators_ipv6 () {
+        let test_str = "2001:db8::2:1, 2001:db8:85a3::8a2e:370:7334";
+        let addr1 = SocketAddr::V6(
+            SocketAddrV6::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 2, 1), 0x1234, 0, 0));
+        let addr2 = SocketAddr::V6(
+            SocketAddrV6::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0x85a3, 0, 0, 0x8a2e, 0x370, 0x7334),
+                0x1234, 0, 0));
+        let use_ipv6 = true;
+        let res = parse_socket_addrs(test_str, 0x1234, use_ipv6);
+        println!("{:?}", res);
+        assert_eq!(res.len(), 3);
+        assert_eq!(res[0], get_loopback_address(0x1234, use_ipv6));
+        assert_eq!(res[1], addr1);
+        assert_eq!(res[2], addr2);
     }
 }
