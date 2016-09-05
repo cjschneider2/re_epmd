@@ -5,13 +5,13 @@
 /// [2]: https://lists.fedoraproject.org/pipermail/devel/2010-July/139135.html
 
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::net::TcpListener;
 use std::net::ToSocketAddrs;
 use std::str::FromStr;
 use std::mem::uninitialized;
-
+use std::io::Read;
 
 use net2::TcpBuilder;
 use net2::TcpListenerExt;
@@ -22,6 +22,7 @@ use libc;
 use super::run_daemon;
 use connection::Connection;
 use constants::{MAX_LISTEN_SOCKETS, CLOSE_TIMEOUT, MAX_FILE_DESCRIPTORS};
+use constants::{IPV6_ONLY};
 use erl_node::ErlNode;
 
 pub struct Epmd {
@@ -130,54 +131,38 @@ impl Epmd {
         // Initialize variables for select()
         self.init_select_vars();
 
-        // Setup file descriptors
-        let mut listen_sock: [i32; MAX_LISTEN_SOCKETS] = [0; MAX_LISTEN_SOCKETS];
-        if self.is_systemd {
-            // for idx in (0..num_sockets) {
-            //     `select_fd_set(self, listensock[i])`
-            //}
-            unimplemented!()
-        } else {
-            // TODO: maybe this could be reduce by using `addrs` as an iterator?
-            for idx in 0..num_sockets {
-                let sock_family = match addrs[idx] {
-                    SocketAddr::V4(_) => libc::AF_INET,
-                    SocketAddr::V6(_) => libc::AF_INET6
-                };
-                listen_sock[idx] = unsafe{
-                    libc::socket(sock_family, libc::SOCK_STREAM, 0)
-                };
-                if listen_sock[idx] < 0 {
-                    // TODO: Read `errno` to identify the error
-                    // IDEA: this read `errno` function should also be a part of
-                    // the libc_utilities module...
-                }
-            }
-            // TODO: `g->listenfd[bound++] = listensock[i];`
+        let socks = create_listen_sockets_from_addrs(addrs);
 
-            // TODO: `setsockopt` for `IPV6_V6ONLY` if `HAVE_DECL_IPV6_ONLY` is
-            // selected as a compile time option -> translate into a feature
-            // flag for cargo.
+        // Set some socket options
+        //for sock in socks.iter() {
+        //    // configure non-blocking sockets
+        //    if let Err(e) = sock.set_nonblocking(true) {
+        //        println!("sock.set_nonblocking err:{}", e);
+        //    }
+        //}
 
-            // Set `SO_REUSEADDR` on all non-windows platforms;
-            // On windows, if this is set the addresses will be reused even if
-            // they are already in use. (behavior difference)
-            if !cfg!(target_os = "windows") {
-                // TODO: From C:
-                //opt = 1;
-                //if ( setsockopt(listensock[i], SOL_SOCKET,
-                //                SO_REUSEADDR, &opt, sizeof(opt) < 0)){
-                //    /* check error */
-                //}
-                unimplemented!()
-            }
-
-            // TODO: this is line 406 or so in `epmd_srv.c`
-
-            unimplemented!()
+        for sock in socks.iter() {
+            println!("{:?}", sock);
         }
 
-        unimplemented!();
+        // main event loop
+        loop {
+            for sock in socks.iter() {
+                match sock.accept() {
+                    Ok((mut stream, sock_addr)) => {
+                        println!("Got stream: {:?} on {:?}",
+                                 stream,
+                                 sock_addr);
+                        let mut buf = Vec::<u8>::new();
+                        let val = stream.read_to_end(&mut buf);
+                        println!("Read {:?} from stream.", buf);
+                    }
+                    Err(e) => {
+                        //println!("Connection failed. :(");
+                    }
+                }
+            }
+        }
     }
 
     pub fn stop(&mut self, val: String) {
@@ -217,7 +202,23 @@ fn ignore_sig_pipe () {
 fn create_listen_sockets_from_addrs (
     in_socks: Vec<SocketAddr>
 ) -> Vec<TcpListener> {
-    let sockets = Vec::<TcpListener>::new();
+    //let sockets = Vec::<TcpListener>::new();
+    let sockets =
+        in_socks.iter()
+        .filter_map(|sock| {
+            let builder = match sock.ip() {
+                IpAddr::V4(..) => TcpBuilder::new_v4(),
+                IpAddr::V6(..) => TcpBuilder::new_v6(),
+            };
+            match builder {
+                Ok(b) => { let _ = b.bind(sock); Some(b) },
+                Err(e) => None,
+            }
+        })
+        .map(|b| { let _ = b.reuse_address(true); b }) // TODO: catch error here
+        .map(|b| { if IPV6_ONLY { let _ = b.only_v6(true); } b })
+        .filter_map(|b| b.listen(0).ok())
+        .collect();
     sockets
 }
 

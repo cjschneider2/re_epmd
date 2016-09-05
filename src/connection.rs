@@ -10,3 +10,17 @@ pub struct Connection {
     pub buffer: Vec<u8>,	// The remaining buffer
     //TODO: mod_time: time??? // Last activity on this socket
 }
+
+impl Connection {
+    fn new (fd: usize, local_peer: bool) -> Connection {
+        Connection {
+            open: false,
+            keep: false,
+            fd: fd,
+            local_peer: local_peer,
+            got: 0,
+            want: 0,
+            buffer: Vec::<u8>::new(),
+        }
+    }
+}

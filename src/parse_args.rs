@@ -10,6 +10,11 @@ pub fn parse_args(epmd: &mut Epmd) -> bool /* should_exit */ {
     let mut argv = env::args();
     let argc = argv.len();
 
+    // TODO: No arguments given == `normal` run?
+    if argc == 1 {
+        return false;
+    }
+
     'arg: loop {
         let arg = match argv.next() {
             Some(string) => string,

@@ -113,3 +113,7 @@ pub const MAX_FILE_DESCRIPTORS: usize = 1024;
 // That is, 3*MAXSYMLEN should be large enough
 const INBUF_SIZE:  usize = (3 * MAX_SYM_LEN);
 const OUTBUF_SIZE: usize = (3 * MAX_SYM_LEN);
+
+// sets the sockets to only use ipv6
+// TODO: Have this option as a feature / configuration option
+pub const IPV6_ONLY: bool = false;
