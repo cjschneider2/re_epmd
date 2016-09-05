@@ -131,7 +131,7 @@ impl Epmd {
         // Initialize variables for select()
         self.init_select_vars();
 
-        let socks = create_listen_sockets_from_addrs(addrs);
+        let socks = create_listen_sockets(addrs);
 
         // Set some socket options
         //for sock in socks.iter() {
@@ -146,15 +146,26 @@ impl Epmd {
         }
 
         // main event loop
+        // the main loop goes something like this:
+        //  * Read the select mask too see if there is anything to do
+        //  * if there isn't then just busy loop looking for work
+        //  * if there is something to do, then set the current time & try to
+        //    accept() on all sockets with data until we don't have any one
+        //    trying to connect or we've run out of our allowance of
+        //    connection sockets.
+        //  * For all of our connection objects:
+        //    * if we have an open connection then try to `do_read()` on
+        //      the socket to communicate with the client.
+        //    * or if the connection should be shutdown we'll kill and free the
+        //      connection; this can be due to a timeout or the client closing
+        //      the connection.
         loop {
             for sock in socks.iter() {
                 match sock.accept() {
                     Ok((mut stream, sock_addr)) => {
-                        println!("Got stream: {:?} on {:?}",
-                                 stream,
-                                 sock_addr);
+                        println!("Got stream: {:?} on {:?}", stream, sock_addr);
                         let mut buf = Vec::<u8>::new();
-                        let val = stream.read_to_end(&mut buf);
+                        let val = stream.read(&mut buf);
                         println!("Read {:?} from stream.", buf);
                     }
                     Err(e) => {
@@ -187,7 +198,6 @@ impl Epmd {
         self.select_fd_top = 0;
     }
 
-
 }
 
 /// Ignore the SIGPIPE signal that is raised when we call write
@@ -199,10 +209,9 @@ fn ignore_sig_pipe () {
 
 /// Creates a list of listening sockets from which we can call select on and
 /// check for incoming connections.
-fn create_listen_sockets_from_addrs (
-    in_socks: Vec<SocketAddr>
-) -> Vec<TcpListener> {
-    //let sockets = Vec::<TcpListener>::new();
+// TODO:
+//  * Catch errors we throw away through the `let _ = Result<()>` statements.
+fn create_listen_sockets (in_socks: Vec<SocketAddr>) -> Vec<TcpListener> {
     let sockets =
         in_socks.iter()
         .filter_map(|sock| {
@@ -215,7 +224,7 @@ fn create_listen_sockets_from_addrs (
                 Err(e) => None,
             }
         })
-        .map(|b| { let _ = b.reuse_address(true); b }) // TODO: catch error here
+        .map(|b| { let _ = b.reuse_address(true); b })
         .map(|b| { if IPV6_ONLY { let _ = b.only_v6(true); } b })
         .filter_map(|b| b.listen(0).ok())
         .collect();
