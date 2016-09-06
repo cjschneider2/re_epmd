@@ -4,14 +4,17 @@
 /// [1]: https://msdn.microsoft.com/en-us/library/windows/desktop/ms741563.aspx
 /// [2]: https://lists.fedoraproject.org/pipermail/devel/2010-July/139135.html
 
+use std::str::FromStr;
+use std::mem::uninitialized;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::net::TcpListener;
 use std::net::ToSocketAddrs;
-use std::str::FromStr;
-use std::mem::uninitialized;
 use std::io::Read;
+use std::io::ErrorKind;
+use std::time::{Duration, Instant};
+use std::thread::sleep;
 
 use net2::TcpBuilder;
 use net2::TcpListenerExt;
@@ -24,8 +27,10 @@ use connection::Connection;
 use constants::{MAX_LISTEN_SOCKETS, CLOSE_TIMEOUT, MAX_FILE_DESCRIPTORS};
 use constants::{IPV6_ONLY};
 use erl_node::ErlNode;
+use libc_utils;
+use parse_args::EpmdReq;
 
-pub struct Epmd {
+pub struct EpmdConfig {
     // -- program flags --
     pub debug: bool,
     pub silent: bool,
@@ -34,20 +39,44 @@ pub struct Epmd {
     pub brutal_kill: bool, // Check if needed
     pub use_ipv6: bool,
     // -- extra options --
-    pub packet_timeout: usize,
+    pub packet_timeout: Duration,
     pub delay_accept: usize,
     pub delay_write: usize,
     // -- connection properties --
     pub address: String,
     pub port: u16,
-    // -- program constants --
-    pub max_conn: usize,
+}
+
+impl EpmdConfig {
+    pub fn new() -> EpmdConfig {
+        EpmdConfig {
+            // -- program flags --
+            debug: false,
+            silent: false,
+            is_daemon: false,
+            is_systemd: false,
+            brutal_kill: false,
+            use_ipv6: false,
+            // -- extra options --
+            packet_timeout: Duration::new(CLOSE_TIMEOUT, 0),
+            delay_accept: 0,
+            delay_write: 0,
+            // -- connection properties --
+            address: get_address(),
+            port: get_port_number(),
+            // -- currently unused --
+        }
+    }
+}
+
+pub struct Epmd {
     // TODO: active_conn & listen_fd maybe could be combined into a Vec<fd>
     pub active_conn: usize,
-    pub listen_fd: [i32; MAX_LISTEN_SOCKETS],
+    listen_fd: [i32; MAX_LISTEN_SOCKETS],
+    pub max_conn: usize,
     // -- program data --
-    pub nodes: HashSet<ErlNode>,
-    pub conn: Vec<Connection>,
+    //pub nodes: HashSet<ErlNode>,
+    //pub connections: Vec<Connection>,
     // -- currently unused --
     pub select_fd_top: usize, // what is this?
     pub orig_read_mask: libc::fd_set,
@@ -62,149 +91,146 @@ const POINTER_BITS:usize = 64;
 impl Epmd {
     pub fn new () -> Epmd {
         Epmd {
-            // -- program flags --
-            debug: false,
-            silent: false,
-            is_daemon: false,
-            is_systemd: false,
-            brutal_kill: false,
-            use_ipv6: false,
-            // -- extra options --
-            packet_timeout: CLOSE_TIMEOUT,
-            delay_accept: 0,
-            delay_write: 0,
-            // -- program constants --
-            max_conn: MAX_FILE_DESCRIPTORS,
-            // -- connection properties --
-            address: get_address(),
-            port: get_port_number(),
             active_conn: 0,
             listen_fd: [-1; MAX_LISTEN_SOCKETS],
+            max_conn: MAX_FILE_DESCRIPTORS,
             // -- program data --
-            nodes: HashSet::<ErlNode>::new(),
-            conn: Vec::<Connection>::new(),
-            // -- currently unused --
-            select_fd_top: 0,
+            //nodes: HashSet::<ErlNode>::new(),
+            //connections: Vec::<Connection>::new(),
             orig_read_mask: unsafe { uninitialized() },
+            select_fd_top: 0,
         }
-    }
-
-    pub fn kill (&mut self) {
-        println!("TODO: epmd.kill()");
-        unimplemented!();
-    }
-
-    pub fn call (&mut self) {
-        println!("TODO: epmd.call()");
-        unimplemented!();
-    }
-
-    pub fn run (&mut self) {
-
-        /* TODO: systemd related initialization...
-        epmd does some querying of the system though systemd if it's available.
-        namely using `sd_listen_fds(0)` To get the max # of sockets of the
-        system. [2] has a decent way to go about using systemd to find the
-        start of the socket counters in this way. This is set elsewhere so I'll
-        just ignore this for now. ( the max will just be `MAX_FILE_DESCRIPTORS` )
-
-        IDEA?: maybe put all of the systemd functions into it's own module?
-        */
-
-        let addrs = parse_socket_addrs(&self.address, self.port, self.use_ipv6);
-        let num_sockets = addrs.len();
-
-        if num_sockets >= MAX_LISTEN_SOCKETS {
-            panic!("Cannot listen on more than {} IP Addresses",
-                   MAX_LISTEN_SOCKETS);
-        }
-
-        if cfg!(all(unix)) {
-            ignore_sig_pipe();
-        }
-
-        // Initialize the number of active file descriptors;
-        // `stdin`, `stdout`, & `stderr` are still open.
-        self.active_conn = 3 + num_sockets;
-        self.max_conn -= num_sockets;
-
-        // Initialize variables for select()
-        self.init_select_vars();
-
-        let socks = create_listen_sockets(addrs);
-
-        // Set some socket options
-        //for sock in socks.iter() {
-        //    // configure non-blocking sockets
-        //    if let Err(e) = sock.set_nonblocking(true) {
-        //        println!("sock.set_nonblocking err:{}", e);
-        //    }
-        //}
-
-        for sock in socks.iter() {
-            println!("{:?}", sock);
-        }
-
-        // main event loop
-        // the main loop goes something like this:
-        //  * Read the select mask too see if there is anything to do
-        //  * if there isn't then just busy loop looking for work
-        //  * if there is something to do, then set the current time & try to
-        //    accept() on all sockets with data until we don't have any one
-        //    trying to connect or we've run out of our allowance of
-        //    connection sockets.
-        //  * For all of our connection objects:
-        //    * if we have an open connection then try to `do_read()` on
-        //      the socket to communicate with the client.
-        //    * or if the connection should be shutdown we'll kill and free the
-        //      connection; this can be due to a timeout or the client closing
-        //      the connection.
-        loop {
-            for sock in socks.iter() {
-                match sock.accept() {
-                    Ok((mut stream, sock_addr)) => {
-                        println!("Got stream: {:?} on {:?}", stream, sock_addr);
-                        let mut buf = Vec::<u8>::new();
-                        let val = stream.read(&mut buf);
-                        println!("Read {:?} from stream.", buf);
-                    }
-                    Err(e) => {
-                        //println!("Connection failed. :(");
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn stop(&mut self, val: String) {
-        val.len();
-        unimplemented!();
-    }
-
-    pub fn run_daemon(self) {
-        run_daemon(self);
-    }
-
-    fn init_select_vars(&mut self) {
-        // TODO:
-        // Factor all of the select / fd_set stuff into it's own module
-        // to put all of the unsafe code in one place.
-        //
-        // maybe call it `libc_utilities.rs` and include `ignore_sig_pipe()`
-        // in with that file...
-        unsafe {
-            libc::FD_ZERO(&mut self.orig_read_mask);
-        }
-        self.select_fd_top = 0;
     }
 
 }
 
-/// Ignore the SIGPIPE signal that is raised when we call write
-/// twice on a socket closed by the other end.
-fn ignore_sig_pipe () {
-    use libc::{signal, SIGPIPE, SIG_IGN};
-    unsafe { signal(SIGPIPE, SIG_IGN); }
+
+pub fn run (mut epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>) {
+
+    /* TODO: systemd related initialization...
+    epmd does some querying of the system though systemd if it's available.
+    namely using `sd_listen_fds(0)` To get the max # of sockets of the
+    system. [2] has a decent way to go about using systemd to find the
+    start of the socket counters in this way. This is set elsewhere so I'll
+    just ignore this for now. ( the max will just be `MAX_FILE_DESCRIPTORS` )
+
+    IDEA?: maybe put all of the systemd functions into it's own module?
+     */
+
+    let addrs = parse_socket_addrs(&config.address, config.port, config.use_ipv6);
+    let num_sockets = addrs.len();
+
+    if num_sockets >= MAX_LISTEN_SOCKETS {
+        panic!("Cannot listen on more than {} IP Addresses",
+               MAX_LISTEN_SOCKETS);
+    }
+
+    if cfg!(all(unix)) {
+        libc_utils::ignore_sig_pipe();
+    }
+
+    // Initialize the number of active file descriptors;
+    // `stdin`, `stdout`, & `stderr` are still open.
+    epmd.active_conn = 3 + num_sockets;
+    epmd.max_conn -= num_sockets;
+
+    // Initialize variables for select()
+    libc_utils::init_select_vars(&mut epmd);
+
+    let socks = create_listen_sockets(addrs);
+
+    // Set some socket options
+    for sock in socks.iter() {
+        // configure non-blocking sockets
+        // TODO: I think a better solution would be to block with a timeout
+        // which is, i think, what the old code did (with IDLE_TIMEOUT).
+        //if let Err(e) = sock.set_nonblocking(true) {
+        //    println!("sock.set_nonblocking err:{}", e);
+        //}
+    }
+
+    // DEBUG
+    println!("\nConnected on the following Sockets:");
+    for sock in socks.iter() {
+        println!("\t{:?}", sock);
+    }
+
+    // main event loop
+    // the main loop goes something like this:
+    //  * Read the select mask too see if there is anything to do
+    //  * if there isn't then just busy loop looking for work
+    //  * if there is something to do, then set the current time & try to
+    //    accept() on all sockets with data until we don't have any one
+    //    trying to connect or we've run out of our allowance of
+    //    connection sockets.
+    //  * For all of our connection objects:
+    //    * if we have an open connection then try to `do_read()` on
+    //      the socket to communicate with the client.
+    //    * or if the connection should be shutdown we'll kill and free the
+    //      connection; this can be due to a timeout or the client closing
+    //      the connection.
+    //let nodes = HashSet::<ErlNode>::new();
+    let mut connections = Vec::<Connection>::new();
+    loop {
+        let now = Instant::now();
+        for sock in socks.iter() {
+            match sock.accept() {
+                Ok((stream, peer_addr)) => {
+                    let timeout = Duration::new(0, 500_000_000); // 0.5 sec
+                    let conn = Connection::new(stream, peer_addr, timeout);
+                    connections.push(conn);
+                    println!("Created new connection object");
+                }
+                Err(err) => {
+                    match err.kind() {
+                        ErrorKind::Interrupted => {},
+                        ErrorKind::WouldBlock => {},
+                        ErrorKind::TimedOut => {},
+                        error_kind => {
+                            // TODO: Recover gracefully...
+                            panic!("socket.accept(): {:?}", error_kind);
+                        }
+                    }
+                }
+            }
+        }
+
+        for mut conn in &mut connections {
+            let has_timed_out = conn.mod_time + config.packet_timeout < now;
+            if conn.open == true {
+                let mesg = conn.do_read();
+                let request = parse_request();
+                let response = do_request(&mut epmd, request);
+                conn.do_write(response);
+            } else if conn.keep == false && has_timed_out {
+                conn.close();
+            }
+        }
+        connections.retain(|conn| conn.keep);
+    }
+}
+
+pub fn stop(epmd: &mut Epmd, val: String) {
+    val.len();
+    unimplemented!();
+}
+
+fn parse_request() -> Vec<u8> {
+    unimplemented!();
+}
+
+fn do_request(epmd: &mut Epmd, request: Vec<u8>) -> Vec<u8> /* response */ {
+    vec![0,1,2,3]
+}
+
+fn kill (epmd: &mut Epmd) {
+    println!("TODO: epmd.kill()");
+    unimplemented!();
+}
+
+fn call (epmd: &mut Epmd) {
+    println!("TODO: epmd.call()");
+    unimplemented!();
 }
 
 /// Creates a list of listening sockets from which we can call select on and

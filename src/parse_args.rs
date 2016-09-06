@@ -1,160 +1,134 @@
 use std::env;
+use std::time::Duration;
 
-use epmd::Epmd;
+use epmd::EpmdConfig;
 use usage::display_usage;
 
-pub fn parse_args(epmd: &mut Epmd) -> bool /* should_exit */ {
+pub enum EpmdReq {
+    Alive2,
+    Port2,
+    Names,
+    Dump,
+    Kill,
+    Stop(String)
+}
 
-    let mut should_exit: bool = false;
+pub enum ParseResponse {
+    Ok,
+    ShouldExit,
+    BadOpt,
+    Call(EpmdReq),
+}
+
+pub fn parse_args(config: &mut EpmdConfig) -> ParseResponse {
 
     let mut argv = env::args();
     let argc = argv.len();
 
     // TODO: No arguments given == `normal` run?
     if argc == 1 {
-        return false;
+        return ParseResponse::Ok;
     }
 
-    'arg: loop {
-        let arg = match argv.next() {
-            Some(string) => string,
-            None => break 'arg
-        };
+    while let Some(arg) = argv.next() {
 
         match arg.as_ref() {
 
-            "-d" => epmd.debug = true,
+            "-d" => config.debug = true,
 
-            "-debug" => epmd.debug = true,
+            "-debug" => config.debug = true,
 
             "-packet_timeout" => {
-                let val: usize = match argv.next() {
+                let val: u64 = match argv.next() {
                     Some(s) => s.parse().expect("packet_timeout value err"),
-                    None => {
-                        display_usage();
-                        should_exit = true;
-                        break 'arg
-                    }
+                    None => return ParseResponse::BadOpt
                 };
-                epmd.packet_timeout = val;
+                config.packet_timeout = Duration::new(val, 0);
             },
 
             "-delay_accept" => {
                 let val: usize = match argv.next() {
                     Some(s) => s.parse().expect("delay_accept value err"),
-                    None => {
-                        display_usage();
-                        should_exit = true;
-                        break 'arg
-                    }
+                    None => return ParseResponse::BadOpt
                 };
-                epmd.delay_accept = val;
+                config.delay_accept = val;
             },
 
             "-delay_write" => {
                 let val: usize = match argv.next() {
                     Some(s) => s.parse().expect("delay_write value err"),
-                    None => {
-                        display_usage();
-                        break 'arg
-                    }
+                    None => return ParseResponse::BadOpt
                 };
-                epmd.delay_write = val;
+                config.delay_write = val;
             },
 
-            "-daemon" => epmd.is_daemon = true,
+            "-daemon" => config.is_daemon = true,
 
-            "-relaxed_command_check" => epmd.brutal_kill = true,
+            "-relaxed_command_check" => config.brutal_kill = true,
 
             "-kill" => {
                 if argc == 1 {
-                    epmd.kill();
+                    return ParseResponse::Call(EpmdReq::Kill)
                 } else {
-                    display_usage();
+                    return ParseResponse::BadOpt
                 }
-                should_exit = true;
-                break 'arg
             },
 
             "-address" => {
                 let val: String = match argv.next() {
                     Some(s) => s,
-                    None => {
-                        display_usage();
-                        should_exit = true;
-                        break 'arg
-                    }
+                    None => return ParseResponse::BadOpt
                 };
-                epmd.address = val;
+                config.address = val;
             },
 
             "-port" => {
                 let val: usize = match argv.next() {
                     Some(s) => s.parse().expect("port value err"),
-                    None => {
-                        display_usage();
-                        should_exit = true;
-                        break 'arg
-                    }
+                    None => return ParseResponse::BadOpt
                 };
-                epmd.port = val as u16;
-                // TODO: Check if there is another argument and stick that
-                // in the `epmd.port` value
+                config.port = val as u16;
             },
 
             "-names" => {
                 if argc == 1 {
-                    unimplemented!();
-                    // epmd.call(EPMD_NAMES_REQ)
+                    return ParseResponse::Call(EpmdReq::Names)
                 } else {
-                    display_usage();
+                    return ParseResponse::BadOpt
                 }
-                should_exit = true;
-                break 'arg
             },
 
             "-started" => {
-                epmd.silent = true;
+                config.silent = true;
                 if argc == 1 {
-                    unimplemented!();
-                    // epmd.call(EPMD_NAMES_REQ)
+                    return ParseResponse::Call(EpmdReq::Names)
                 } else {
-                    display_usage();
+                    return ParseResponse::BadOpt
                 }
-                should_exit = true;
             },
 
             "-dump" => {
                 if argc == 1 {
-                    unimplemented!();
-                    // epmd.call(EPMD_DUMP_REQ)
+                    return ParseResponse::Call(EpmdReq::Dump)
                 } else {
-                    display_usage();
+                    return ParseResponse::BadOpt
                 }
-                should_exit = true;
-                break 'arg
             },
 
             "-stop" => {
-                let val: String = match argv.next() {
+                let name: String = match argv.next() {
                     Some(s) => s,
-                    None => {
-                        display_usage();
-                        should_exit = true;
-                        break 'arg
-                    }
+                    None => return ParseResponse::BadOpt
                 };
-                epmd.stop(val); // (orig: stop_cli(g, argv[1]))
-                should_exit = true;
-                break 'arg
+                return ParseResponse::Call(EpmdReq::Stop(name))
             },
 
             // TODO: Should only be active if the systemd daemon is available
             // apparently it's hiding under the env_var `HAVE_SYSTEMD_DAEMON`???
-            "-systemd" => epmd.is_systemd = true,
+            "-systemd" => config.is_systemd = true,
 
             _ => display_usage(),
         };
     }
-    should_exit
+    ParseResponse::ShouldExit
 }

@@ -74,8 +74,8 @@ const EPMD_STOP_REQ: u8 = 115; // 's'
 // If no activity we let select() return every IDLE_TIMEOUT second
 // A file descriptor that has been idle for CLOSE_TIMEOUT seconds and
 // isn't an ALIVE socket has probably hanged and should be closed
-const IDLE_TIMEOUT: usize  = 5;
-pub const CLOSE_TIMEOUT: usize = 60;
+const IDLE_TIMEOUT: usize    = 5;
+pub const CLOSE_TIMEOUT: u64 = 60;
 
 // We save the name of nodes that are unregistered. If a new
 // node register the name we want to increment the "creation",
@@ -111,7 +111,7 @@ pub const MAX_FILE_DESCRIPTORS: usize = 1024;
 // Largest response: PORT2_RESP
 //     2 + 14 + 2*MAXSYMLEN
 // That is, 3*MAXSYMLEN should be large enough
-const INBUF_SIZE:  usize = (3 * MAX_SYM_LEN);
+pub const INBUF_SIZE:  usize = (3 * MAX_SYM_LEN);
 const OUTBUF_SIZE: usize = (3 * MAX_SYM_LEN);
 
 // sets the sockets to only use ipv6

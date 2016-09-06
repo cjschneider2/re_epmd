@@ -1,7 +1,7 @@
 use libc;
 use std::mem;
 
-use epmd::Epmd;
+use epmd::{self, Epmd, EpmdConfig};
 
 /// Starts a new epmd daemon process
 ///
@@ -34,7 +34,7 @@ use epmd::Epmd;
 /// [2] : http://www.netzmafia.de/skripten/unix/linux-daemon-howto.html
 /// [3] : https://www.gnu.org/software/libc/manual/html_node/Termination-Internals.html#Termination-Internals
 
-pub fn run_daemon_unix (mut epmd: Epmd) {
+pub fn run_daemon_unix (epmd: Epmd, config: EpmdConfig) {
 
     // create the parent process
     // NOTE: For the `fork()` call:
@@ -118,7 +118,7 @@ pub fn run_daemon_unix (mut epmd: Epmd) {
         *errno = 0;
     }
 
-    epmd.run();
+    epmd::run(epmd, config, None);
 }
 
 // TODO: Write the windows version of this function

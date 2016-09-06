@@ -1,26 +1,88 @@
 #![allow(dead_code)]
 
+use std::time::{Instant, Duration};
+use std::net::{TcpStream, SocketAddr};
+use std::io::{Read, BufReader};
+
+use constants::INBUF_SIZE;
+
+enum Status {
+    Idle,
+    NeedData,
+    NeedResp,
+}
+
 pub struct Connection {
     pub open: bool,	// `true` if open
     pub keep: bool,	// Don't close when sent reply
-    pub fd: usize, // File descriptor
-    pub local_peer: bool, // The peer of this connection is via loopback interface
-    pub got: usize,	// # of bytes we have got
-    pub want: usize, // Number of bytes we want
-    pub buffer: Vec<u8>,	// The remaining buffer
-    //TODO: mod_time: time??? // Last activity on this socket
+    pub mod_time: Instant, // Last activity on this socket
+    stream: TcpStream, // TCP connection stream
+    peer_addr: SocketAddr, // Remote peer's socket address
+    local_peer: bool, // This connection is via a local/loopback interface
+    read_buffer: BufReader<TcpStream>,	// The remaining buffer
+    status: Status,
 }
 
 impl Connection {
-    fn new (fd: usize, local_peer: bool) -> Connection {
+    pub fn new (
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Connection {
+        // TODO: Error handling...
+        let _ = stream.set_read_timeout(Some(timeout));
+        let local_addr = stream.local_addr().unwrap();
+        let stream_clone = stream.try_clone().unwrap();
         Connection {
-            open: false,
+            open: true,
             keep: false,
-            fd: fd,
-            local_peer: local_peer,
-            got: 0,
-            want: 0,
-            buffer: Vec::<u8>::new(),
+            stream: stream,
+            peer_addr: peer_addr,
+            local_peer: is_local_peer(&peer_addr, &local_addr),
+            read_buffer: BufReader::new(stream_clone),
+            mod_time: Instant::now(),
+            status: Status::Idle,
         }
     }
+
+    pub fn do_read(&mut self) -> Vec<u8> {
+        let mut buf = [0; INBUF_SIZE];
+        let bytes_recv = match self.read_buffer.read(&mut buf) {
+            Ok(size) => size,
+            Err(e) => { println!("read() error: {:?}", e); 0 }
+        };
+        println!("Received {} bytes.", bytes_recv);
+
+        let mut vec = buf.to_vec();
+        vec.truncate(bytes_recv);
+
+        // Error Checking - Correct Length
+        let len = if vec.len() >= 2 {
+            u16::from_be(vec[0] as u16 + (vec[1] as u16) << 8)
+        } else {
+            println!("Received packet too short... :(");
+            0
+        };
+        println!("Expected len: {}\nReceived len: {}", bytes_recv, len + 2);
+
+        vec
+    }
+
+    pub fn do_write(&self, response: Vec<u8>) {
+        let _ = response;
+        unimplemented!();
+    }
+
+    pub fn close(&mut self) {
+        self.keep = false;
+    }
+
+}
+
+/// Function to check to see if the connection comes from a local peer.
+/// This function checks the loopback interface and other local addresses.
+fn is_local_peer(sock_peer: &SocketAddr, sock_local: &SocketAddr) -> bool {
+    let is_loopback  = sock_peer.ip().is_loopback();
+    let is_same_addr = sock_peer.ip() == sock_local.ip();
+    (is_loopback || is_same_addr)
 }
