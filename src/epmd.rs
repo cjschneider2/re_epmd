@@ -29,6 +29,28 @@ use erl_node::ErlNode;
 use libc_utils;
 use parse_args::EpmdReq;
 
+struct Select {
+    pub fd_top: libc::c_int,     // Max file descriptor value + 1
+    pub fd_set: libc::fd_set, // Select read-mask
+}
+
+impl Select {
+    fn new () -> Select {
+        Select {
+            fd_top: 0,
+            fd_set: libc_utils::new_fd_set(),
+        }
+    }
+
+    fn zero_set(&mut self) {
+        libc_utils::select_zero_set(&mut self.fd_set);
+    }
+
+    fn check(&mut self, fd: libc::c_int) -> bool {
+        libc_utils::select_is_set(fd, &mut self.fd_set)
+    }
+}
+
 pub struct EpmdConfig {
     // -- program flags --
     pub debug: bool,
@@ -76,9 +98,6 @@ pub struct Epmd {
     // -- program data --
     //pub nodes: HashSet<ErlNode>,
     //pub connections: Vec<Connection>,
-    // -- currently unused --
-    pub select_fd_top: libc::c_int, // what is this?
-    pub orig_read_mask: libc::fd_set,
 }
 
 
@@ -96,8 +115,6 @@ impl Epmd {
             // -- program data --
             //nodes: HashSet::<ErlNode>::new(),
             //connections: Vec::<Connection>::new(),
-            orig_read_mask: unsafe { zeroed() },
-            select_fd_top: 0,
         }
     }
 
@@ -141,19 +158,13 @@ pub fn run (
     epmd.active_conn = 3 + num_sockets;
     epmd.max_conn -= num_sockets;
 
-    // Initialize variables for select()
-    libc_utils::init_select_vars(&mut epmd);
-
     let listeners = create_listen_sockets(addrs);
 
     // configure sockets for select()
-    unsafe { libc::FD_ZERO(&mut epmd.orig_read_mask); }
-    epmd.select_fd_top = 0;
+    let mut select = Select::new();
     for sock in listeners.iter() {
-        select_fd_set(&mut epmd, sock);
-        if let Err(e) = sock.set_nonblocking(true) {
-            println!("sock.set_nonblocking err:{}", e);
-        }
+        select_fd_set(&mut select, sock);
+        sock.set_nonblocking(true).expect("sock.set_nonblocking()");
     }
 
     // DEBUG
@@ -180,24 +191,20 @@ pub fn run (
     let mut connections = Vec::<Connection>::new();
     loop {
         let now = Instant::now();
-        let mut read_mask = epmd.orig_read_mask.clone();
+        let read_mask = select.fd_set.clone();
 
         println!("before do_select()");
 
-        let events =
-            do_select(epmd.select_fd_top, read_mask).expect("Select() failed");
+        let events = do_select(select.fd_top, read_mask).expect("Select()");
+        if events == 0 {
+            select.zero_set();
+        }
 
         println!("got {} events", events);
 
-        if events == 0 {
-            unsafe { libc::FD_ZERO(&mut read_mask); }
-        }
-
         for sock in listeners.iter() {
             let fd = get_raw_fd(sock);
-            let is_set = unsafe {
-                libc::FD_ISSET(fd , &mut read_mask)
-            };
+            let is_set = select.check(fd);
             if is_set {
                 println!("Trying to accept");
                 match sock.accept() {
@@ -260,13 +267,13 @@ fn call (epmd: &mut Epmd) {
     unimplemented!();
 }
 
-fn select_fd_set( epmd: &mut Epmd, sock: &TcpListener ) {
+fn select_fd_set( select: &mut Select, sock: &TcpListener ) {
     let fd = get_raw_fd(sock);
     unsafe {
-        libc::FD_SET(fd, &mut epmd.orig_read_mask);
+        libc::FD_SET(fd, &mut select.fd_set);
     }
-    if fd >= epmd.select_fd_top {
-        epmd.select_fd_top = fd + 1;
+    if fd >= select.fd_top {
+        select.fd_top = fd + 1;
     }
 }
 
