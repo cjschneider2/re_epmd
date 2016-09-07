@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::time::{Instant, Duration};
-use std::net::{TcpStream, SocketAddr};
+use std::net::{IpAddr, TcpStream, SocketAddr};
 use std::io::{Read, BufReader};
 
 use constants::INBUF_SIZE;
@@ -82,7 +82,13 @@ impl Connection {
 /// Function to check to see if the connection comes from a local peer.
 /// This function checks the loopback interface and other local addresses.
 fn is_local_peer(sock_peer: &SocketAddr, sock_local: &SocketAddr) -> bool {
-    let is_loopback  = sock_peer.ip().is_loopback();
+    // NOTE: IpAddr.is_loopback() is stable since Rust 1.12; Earlier versions
+    // need to get the IpAddrV4/6.is_loopback() respectively.
+    //let is_loopback  = sock_peer.ip().is_loopback();
+    let is_loopback = match sock_peer.ip() {
+        IpAddr::V4(ref a) => a.is_loopback(),
+        IpAddr::V6(ref a) => a.is_loopback(),
+    };
     let is_same_addr = sock_peer.ip() == sock_local.ip();
     (is_loopback || is_same_addr)
 }

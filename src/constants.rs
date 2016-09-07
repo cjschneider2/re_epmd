@@ -74,7 +74,7 @@ const EPMD_STOP_REQ: u8 = 115; // 's'
 // If no activity we let select() return every IDLE_TIMEOUT second
 // A file descriptor that has been idle for CLOSE_TIMEOUT seconds and
 // isn't an ALIVE socket has probably hanged and should be closed
-const IDLE_TIMEOUT: usize    = 5;
+pub const IDLE_TIMEOUT:  i64 = 5;
 pub const CLOSE_TIMEOUT: u64 = 60;
 
 // We save the name of nodes that are unregistered. If a new

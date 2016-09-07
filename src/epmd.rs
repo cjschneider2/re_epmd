@@ -4,17 +4,16 @@
 /// [1]: https://msdn.microsoft.com/en-us/library/windows/desktop/ms741563.aspx
 /// [2]: https://lists.fedoraproject.org/pipermail/devel/2010-July/139135.html
 
-use std::str::FromStr;
-use std::mem::uninitialized;
-use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::io::{Read, Result, ErrorKind, Error};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::net::TcpListener;
-use std::net::ToSocketAddrs;
-use std::io::Read;
-use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{TcpListener, ToSocketAddrs};
 use std::time::{Duration, Instant};
+use std::collections::HashSet;
+use std::mem::zeroed;
 use std::thread::sleep;
+use std::str::FromStr;
+use std::ptr;
 
 use net2::TcpBuilder;
 use net2::TcpListenerExt;
@@ -78,7 +77,7 @@ pub struct Epmd {
     //pub nodes: HashSet<ErlNode>,
     //pub connections: Vec<Connection>,
     // -- currently unused --
-    pub select_fd_top: usize, // what is this?
+    pub select_fd_top: libc::c_int, // what is this?
     pub orig_read_mask: libc::fd_set,
 }
 
@@ -97,7 +96,7 @@ impl Epmd {
             // -- program data --
             //nodes: HashSet::<ErlNode>::new(),
             //connections: Vec::<Connection>::new(),
-            orig_read_mask: unsafe { uninitialized() },
+            orig_read_mask: unsafe { zeroed() },
             select_fd_top: 0,
         }
     }
@@ -105,8 +104,11 @@ impl Epmd {
 }
 
 
-pub fn run (mut epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>) {
-
+pub fn run (
+    mut epmd: Epmd,
+    config: EpmdConfig,
+    with_request: Option<EpmdReq>
+) {
     /* TODO: systemd related initialization...
     epmd does some querying of the system though systemd if it's available.
     namely using `sd_listen_fds(0)` To get the max # of sockets of the
@@ -117,7 +119,12 @@ pub fn run (mut epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>) {
     IDEA?: maybe put all of the systemd functions into it's own module?
      */
 
-    let addrs = parse_socket_addrs(&config.address, config.port, config.use_ipv6);
+    let addrs =
+        parse_socket_addrs(
+            &config.address,
+            config.port,
+            config.use_ipv6);
+
     let num_sockets = addrs.len();
 
     if num_sockets >= MAX_LISTEN_SOCKETS {
@@ -137,21 +144,21 @@ pub fn run (mut epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>) {
     // Initialize variables for select()
     libc_utils::init_select_vars(&mut epmd);
 
-    let socks = create_listen_sockets(addrs);
+    let listeners = create_listen_sockets(addrs);
 
-    // Set some socket options
-    for sock in socks.iter() {
-        // configure non-blocking sockets
-        // TODO: I think a better solution would be to block with a timeout
-        // which is, i think, what the old code did (with IDLE_TIMEOUT).
-        //if let Err(e) = sock.set_nonblocking(true) {
-        //    println!("sock.set_nonblocking err:{}", e);
-        //}
+    // configure sockets for select()
+    unsafe { libc::FD_ZERO(&mut epmd.orig_read_mask); }
+    epmd.select_fd_top = 0;
+    for sock in listeners.iter() {
+        select_fd_set(&mut epmd, sock);
+        if let Err(e) = sock.set_nonblocking(true) {
+            println!("sock.set_nonblocking err:{}", e);
+        }
     }
 
     // DEBUG
     println!("\nConnected on the following Sockets:");
-    for sock in socks.iter() {
+    for sock in listeners.iter() {
         println!("\t{:?}", sock);
     }
 
@@ -173,22 +180,42 @@ pub fn run (mut epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>) {
     let mut connections = Vec::<Connection>::new();
     loop {
         let now = Instant::now();
-        for sock in socks.iter() {
-            match sock.accept() {
-                Ok((stream, peer_addr)) => {
-                    let timeout = Duration::new(0, 500_000_000); // 0.5 sec
-                    let conn = Connection::new(stream, peer_addr, timeout);
-                    connections.push(conn);
-                    println!("Created new connection object");
-                }
-                Err(err) => {
-                    match err.kind() {
-                        ErrorKind::Interrupted => {},
-                        ErrorKind::WouldBlock => {},
-                        ErrorKind::TimedOut => {},
-                        error_kind => {
-                            // TODO: Recover gracefully...
-                            panic!("socket.accept(): {:?}", error_kind);
+        let mut read_mask = epmd.orig_read_mask.clone();
+
+        println!("before do_select()");
+
+        let events =
+            do_select(epmd.select_fd_top, read_mask).expect("Select() failed");
+
+        println!("got {} events", events);
+
+        if events == 0 {
+            unsafe { libc::FD_ZERO(&mut read_mask); }
+        }
+
+        for sock in listeners.iter() {
+            let fd = get_raw_fd(sock);
+            let is_set = unsafe {
+                libc::FD_ISSET(fd , &mut read_mask)
+            };
+            if is_set {
+                println!("Trying to accept");
+                match sock.accept() {
+                    Ok((stream, peer_addr)) => {
+                        let timeout = Duration::new(0, 500_000_000); // 0.5 sec
+                        let conn = Connection::new(stream, peer_addr, timeout);
+                        connections.push(conn);
+                        println!("Created new connection object");
+                    }
+                    Err(err) => {
+                        match err.kind() {
+                            ErrorKind::Interrupted => {},
+                            ErrorKind::WouldBlock => {},
+                            ErrorKind::TimedOut => {},
+                            error_kind => {
+                                // TODO: Recover gracefully...
+                                panic!("socket.accept(): {:?}", error_kind);
+                            }
                         }
                     }
                 }
@@ -199,7 +226,7 @@ pub fn run (mut epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>) {
             let has_timed_out = conn.mod_time + config.packet_timeout < now;
             if conn.open == true {
                 let mesg = conn.do_read();
-                let request = parse_request();
+                let request = parse_request(mesg);
                 let response = do_request(&mut epmd, request);
                 conn.do_write(response);
             } else if conn.keep == false && has_timed_out {
@@ -215,7 +242,7 @@ pub fn stop(epmd: &mut Epmd, val: String) {
     unimplemented!();
 }
 
-fn parse_request() -> Vec<u8> {
+fn parse_request(mesg: Vec<u8>) -> Vec<u8> {
     unimplemented!();
 }
 
@@ -231,6 +258,57 @@ fn kill (epmd: &mut Epmd) {
 fn call (epmd: &mut Epmd) {
     println!("TODO: epmd.call()");
     unimplemented!();
+}
+
+fn select_fd_set( epmd: &mut Epmd, sock: &TcpListener ) {
+    let fd = get_raw_fd(sock);
+    unsafe {
+        libc::FD_SET(fd, &mut epmd.orig_read_mask);
+    }
+    if fd >= epmd.select_fd_top {
+        epmd.select_fd_top = fd + 1;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_raw_fd(listener: TcpListener) -> libc::c_int {
+    listener.as_raw_socket() as libc::c_int
+}
+#[cfg(any(unix))]
+fn get_raw_fd(listener: &TcpListener) -> libc::c_int {
+    use std::os::unix::io::AsRawFd;
+    listener.as_raw_fd() as libc::c_int
+}
+
+fn do_select(fd_limit: libc::c_int, mut mask: libc::fd_set) -> Result<usize> {
+    use constants::IDLE_TIMEOUT;
+    let mut timeout = libc::timeval { tv_sec: IDLE_TIMEOUT, tv_usec: 0 };
+    let events = unsafe {
+        libc::select(
+            fd_limit,
+            &mut mask, /* read  fds */
+            ptr::null_mut(), /* write fds */
+            ptr::null_mut(), /* error fds */
+            &mut timeout)
+    };
+    if events < 0 {
+        let e = Error::last_os_error();
+        match e.raw_os_error().unwrap() {
+            // Just because all of these aren't defined by ErrorKind...
+            libc::EINTR  => { /* interrupted; this is okay */ },
+            libc::EINVAL => { /* timeout;     this is okay */ },
+            _ => {
+                // Can also return the following:
+                // EBADF: invalid fd
+                // EINVAL: can be:
+                //  - invalid timeout specified
+                //  - `fd_limit` is less than 0 or greater than `FD_SETSIZE`
+                //  - One of the fds refers to a STREAM or Multiplexer
+                return Err(e)
+            },
+        }
+    }
+    Ok(events as usize)
 }
 
 /// Creates a list of listening sockets from which we can call select on and
