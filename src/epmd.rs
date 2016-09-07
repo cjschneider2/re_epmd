@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 use std::collections::HashSet;
 use std::mem::zeroed;
 use std::thread::sleep;
-use std::str::FromStr;
-use std::ptr;
+use std::str::from_utf8;
 
 use net2::TcpBuilder;
 use net2::TcpListenerExt;
@@ -27,7 +26,16 @@ use constants::{MAX_LISTEN_SOCKETS, CLOSE_TIMEOUT, MAX_FILE_DESCRIPTORS};
 use constants::{IPV6_ONLY};
 use erl_node::ErlNode;
 use libc_utils;
-use parse_args::EpmdReq;
+
+pub enum EpmdReq {
+    None,
+    Alive2(u16, u8, u8, u16, String, Vec<u8>),
+    Port2(String),
+    Names,
+    Dump,
+    Kill,
+    Stop(String)
+}
 
 struct Select {
     pub fd_top: libc::c_int,     // Max file descriptor value + 1
@@ -47,7 +55,19 @@ impl Select {
     }
 
     fn check(&mut self, fd: libc::c_int) -> bool {
-        libc_utils::select_is_set(fd, &mut self.fd_set)
+        libc_utils::select_is_set(&mut self.fd_set, fd)
+    }
+
+    fn select(&self, mut set: libc::fd_set) -> Result<usize> {
+        libc_utils::select(&mut set, self.fd_top, )
+    }
+
+    fn set_fd(&mut self, sock: &TcpListener) {
+        let fd = get_raw_fd(sock) as libc::c_int;
+        libc_utils::select_fd_set(&mut self.fd_set, fd);
+        if fd >= self.fd_top {
+            self.fd_top = fd + 1;
+        }
     }
 }
 
@@ -163,7 +183,7 @@ pub fn run (
     // configure sockets for select()
     let mut select = Select::new();
     for sock in listeners.iter() {
-        select_fd_set(&mut select, sock);
+        select.set_fd(sock);
         sock.set_nonblocking(true).expect("sock.set_nonblocking()");
     }
 
@@ -195,7 +215,7 @@ pub fn run (
 
         println!("before do_select()");
 
-        let events = do_select(select.fd_top, read_mask).expect("Select()");
+        let events = select.select(read_mask).expect("Select()");
         if events == 0 {
             select.zero_set();
         }
@@ -204,9 +224,7 @@ pub fn run (
 
         for sock in listeners.iter() {
             let fd = get_raw_fd(sock);
-            let is_set = select.check(fd);
-            if is_set {
-                println!("Trying to accept");
+            if select.check(fd) {
                 match sock.accept() {
                     Ok((stream, peer_addr)) => {
                         let timeout = Duration::new(0, 500_000_000); // 0.5 sec
@@ -234,9 +252,9 @@ pub fn run (
             if conn.open == true {
                 let mesg = conn.do_read();
                 let request = parse_request(mesg);
-                let response = do_request(&mut epmd, request);
+                let response = do_request(&mut epmd, vec![]);
                 conn.do_write(response);
-            } else if conn.keep == false && has_timed_out {
+            } else if !conn.keep && has_timed_out {
                 conn.close();
             }
         }
@@ -249,8 +267,38 @@ pub fn stop(epmd: &mut Epmd, val: String) {
     unimplemented!();
 }
 
-fn parse_request(mesg: Vec<u8>) -> Vec<u8> {
-    unimplemented!();
+fn parse_request(mesg: Vec<u8>) -> EpmdReq {
+    if mesg.len() < 2 {
+        return EpmdReq::None;
+    }
+    let (len_v, data ) = mesg.split_at(2);
+    let len = u16::from_be(len_v[0] as u16 + (len_v[1] as u16) << 8);
+    let (req, data ) = data.split_at(1);
+    match req[0] {
+        120 => {
+            let port = u16::from_be(data[0] as u16 + (data[1] as u16) << 8);
+            let node_type = data[3];
+            let protocol = data[4];
+            let high_ver = u16::from_be(data[5] as u16 + (data[6] as u16) << 8);
+            let name_len = u16::from_be(data[5] as u16 + (data[6] as u16) << 8);
+            let (len, data) = data.split_at(7);
+            let name_len = u16::from_be(len[0] as u16 + (data[1] as u16) << 8);
+            let (_name, data) = data.split_at(name_len as usize);
+            let name = from_utf8(_name).unwrap_or("INVALID_NAME");
+            let (len, extra) = data.split_at(2);
+            EpmdReq::Alive2(port, node_type, protocol,
+                            high_ver, name.to_string(), extra.to_owned())
+            }
+        122 => {
+            let name = from_utf8(data).unwrap_or("INVALID");
+            EpmdReq::Port2(name.to_string())
+            }
+        110 => EpmdReq::Names,
+        100 => EpmdReq::Dump,
+        107 => EpmdReq::Kill,
+        115 => EpmdReq::Stop("STOPPED".to_string()),
+        _ => EpmdReq::None
+    }
 }
 
 fn do_request(epmd: &mut Epmd, request: Vec<u8>) -> Vec<u8> /* response */ {
@@ -267,16 +315,6 @@ fn call (epmd: &mut Epmd) {
     unimplemented!();
 }
 
-fn select_fd_set( select: &mut Select, sock: &TcpListener ) {
-    let fd = get_raw_fd(sock);
-    unsafe {
-        libc::FD_SET(fd, &mut select.fd_set);
-    }
-    if fd >= select.fd_top {
-        select.fd_top = fd + 1;
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn get_raw_fd(listener: TcpListener) -> libc::c_int {
     listener.as_raw_socket() as libc::c_int
@@ -287,36 +325,6 @@ fn get_raw_fd(listener: &TcpListener) -> libc::c_int {
     listener.as_raw_fd() as libc::c_int
 }
 
-fn do_select(fd_limit: libc::c_int, mut mask: libc::fd_set) -> Result<usize> {
-    use constants::IDLE_TIMEOUT;
-    let mut timeout = libc::timeval { tv_sec: IDLE_TIMEOUT, tv_usec: 0 };
-    let events = unsafe {
-        libc::select(
-            fd_limit,
-            &mut mask, /* read  fds */
-            ptr::null_mut(), /* write fds */
-            ptr::null_mut(), /* error fds */
-            &mut timeout)
-    };
-    if events < 0 {
-        let e = Error::last_os_error();
-        match e.raw_os_error().unwrap() {
-            // Just because all of these aren't defined by ErrorKind...
-            libc::EINTR  => { /* interrupted; this is okay */ },
-            libc::EINVAL => { /* timeout;     this is okay */ },
-            _ => {
-                // Can also return the following:
-                // EBADF: invalid fd
-                // EINVAL: can be:
-                //  - invalid timeout specified
-                //  - `fd_limit` is less than 0 or greater than `FD_SETSIZE`
-                //  - One of the fds refers to a STREAM or Multiplexer
-                return Err(e)
-            },
-        }
-    }
-    Ok(events as usize)
-}
 
 /// Creates a list of listening sockets from which we can call select on and
 /// check for incoming connections.

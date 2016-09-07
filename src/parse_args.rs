@@ -2,16 +2,8 @@ use std::env;
 use std::time::Duration;
 
 use epmd::EpmdConfig;
+use epmd::EpmdReq;
 use usage::display_usage;
-
-pub enum EpmdReq {
-    Alive2,
-    Port2,
-    Names,
-    Dump,
-    Kill,
-    Stop(String)
-}
 
 pub enum ParseResponse {
     Ok,

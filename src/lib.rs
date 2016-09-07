@@ -12,8 +12,9 @@ mod libc_utils;
 
 pub use usage::display_usage;
 pub use parse_args::parse_args;
-pub use parse_args::{ParseResponse, EpmdReq};
+pub use parse_args::ParseResponse;
 
+pub use epmd::EpmdReq;
 pub use epmd::Epmd;
 pub use epmd::EpmdConfig;
 
