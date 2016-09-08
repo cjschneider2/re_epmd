@@ -23,18 +23,35 @@ use libc;
 use super::run_daemon;
 use connection::Connection;
 use constants::{MAX_LISTEN_SOCKETS, CLOSE_TIMEOUT, MAX_FILE_DESCRIPTORS};
-use constants::{IPV6_ONLY};
+use constants::{IPV6_ONLY, ALIVE2_RESP, PORT2_RESP};
 use erl_node::ErlNode;
 use libc_utils;
 
+#[derive(Debug)]
 pub enum EpmdReq {
     None,
-    Alive2(u16, u8, u8, u16, String, Vec<u8>),
-    Port2(String),
+    // port, type, protocol, high_ver, low_ver, name, extra
+    Alive2(u16, u8, u8, u16, u16, String, Vec<u8>),
+    Port2(String), // Name
     Names,
     Dump,
     Kill,
-    Stop(String)
+    Stop(String) // Name
+}
+
+#[derive(Debug)]
+pub enum EpmdResp {
+    None,
+    Alive2(u8, u16), // Result, Creation
+    Port2Err(u8),    // just result is given if error.
+    // result, port, type, protocol, high_ver, low_ver, name, extra
+    Port2Ok(u8, u16, u8, u8, u16, u16, String, Vec<u8>),
+    Names(u32, String),
+    Dump(u32, String),
+    KillErr(String), // TODO: Check to see if this is used in epmd
+    KillOk(String),  // "OK" is sent if successful
+    StopErr(String), // "NOEXIST" is sent if node doesn't exist
+    StopOk(String),  // "STOPPED" is sent if node is removed
 }
 
 struct Select {
@@ -111,13 +128,9 @@ impl EpmdConfig {
 }
 
 pub struct Epmd {
-    // TODO: active_conn & listen_fd maybe could be combined into a Vec<fd>
     pub active_conn: usize,
-    listen_fd: [i32; MAX_LISTEN_SOCKETS],
     pub max_conn: usize,
-    // -- program data --
-    //pub nodes: HashSet<ErlNode>,
-    //pub connections: Vec<Connection>,
+    pub nodes: HashSet<ErlNode>,
 }
 
 
@@ -130,14 +143,10 @@ impl Epmd {
     pub fn new () -> Epmd {
         Epmd {
             active_conn: 0,
-            listen_fd: [-1; MAX_LISTEN_SOCKETS],
             max_conn: MAX_FILE_DESCRIPTORS,
-            // -- program data --
-            //nodes: HashSet::<ErlNode>::new(),
-            //connections: Vec::<Connection>::new(),
+            nodes: HashSet::<ErlNode>::new(),
         }
     }
-
 }
 
 
@@ -146,6 +155,7 @@ pub fn run (
     config: EpmdConfig,
     with_request: Option<EpmdReq>
 ) {
+    println!("");
     /* TODO: systemd related initialization...
     epmd does some querying of the system though systemd if it's available.
     namely using `sd_listen_fds(0)` To get the max # of sockets of the
@@ -183,12 +193,13 @@ pub fn run (
     // configure sockets for select()
     let mut select = Select::new();
     for sock in listeners.iter() {
+        println!("creating set_fd for {:?}", sock);
         select.set_fd(sock);
         sock.set_nonblocking(true).expect("sock.set_nonblocking()");
     }
 
     // DEBUG
-    println!("\nConnected on the following Sockets:");
+    println!("Connected on the following Sockets:");
     for sock in listeners.iter() {
         println!("\t{:?}", sock);
     }
@@ -252,8 +263,16 @@ pub fn run (
             if conn.open == true {
                 let mesg = conn.do_read();
                 let request = parse_request(mesg);
-                let response = do_request(&mut epmd, vec![]);
-                conn.do_write(response);
+                println!("Got request: {:?}", request);
+                let response = do_request(&mut epmd, request);
+                match response {
+                    EpmdResp::None => {},
+                    _ => {
+                        let resp_data = serialize_response(response);
+                        conn.do_write(resp_data);
+                    }
+
+                }
             } else if !conn.keep && has_timed_out {
                 conn.close();
             }
@@ -267,42 +286,146 @@ pub fn stop(epmd: &mut Epmd, val: String) {
     unimplemented!();
 }
 
-fn parse_request(mesg: Vec<u8>) -> EpmdReq {
-    if mesg.len() < 2 {
-        return EpmdReq::None;
+fn serialize_response(resp: EpmdResp) -> Vec<u8> {
+    let ser_u16 = |n: u16| -> [u8; 2] {
+        let be = u16::to_be(n);
+        [(be & 0xFF) as u8, (be >> 8 & 0xFF) as u8]
+    };
+    let ser_u32 = |n: u32| -> [u8; 4] {
+        let be = u32::to_be(n);
+        [(be & 0xFF) as u8,
+         (be >> 8 & 0xFF) as u8,
+         (be >> 16 & 0xFF) as u8,
+         (be >> 24 & 0xFF) as u8]
+    };
+    match resp {
+        EpmdResp::None => vec![],
+        EpmdResp::Alive2(result, creation) => {
+            let c = ser_u16(creation);
+            vec![ALIVE2_RESP, result, c[0], c[1]]
+        }
+        EpmdResp::Port2Err(errno) => {
+            vec![PORT2_RESP, errno]
+        }
+        EpmdResp::Port2Ok(res, port, n_type, proto, hver, lver, name, ext) => {
+            let pt    = ser_u16(port);
+            let hv    = ser_u16(hver);
+            let lv    = ser_u16(lver);
+            let n_len = ser_u16(name.len() as u16);
+            let e_len = ser_u16(ext.len() as u16);
+            let mut resp = vec![
+                PORT2_RESP, res,
+                pt[0], pt[1],
+                n_type, proto,
+                hv[0], hv[1],
+                lv[0], lv[1],
+                n_len[0], n_len[1]
+            ];
+            resp.extend_from_slice(&name.into_bytes());
+            resp.push(e_len[0]);
+            resp.push(e_len[1]);
+            resp.extend_from_slice(&ext);
+            resp
+        }
+        EpmdResp::Names(epmd_port, name_list) |
+        EpmdResp::Dump(epmd_port, name_list) => {
+            let ep = ser_u32(epmd_port);
+            let mut resp = vec![ep[0], ep[1], ep[2], ep[3]];
+            resp.extend_from_slice(&name_list.into_bytes());
+            resp
+        }
+        EpmdResp::KillErr(s) => { vec![] },
+        EpmdResp::KillOk(s)  => { vec![79, 75] /* "OK" */ },
+        EpmdResp::StopErr(s) => { vec![78, 79, 69, 88, 73, 83, 84] }, //"NOEXIST"
+        EpmdResp::StopOk(s)  => { vec![83, 84, 79, 80, 80, 69, 68] }, //"STOPPED"
     }
+}
+
+fn parse_request(mesg: Vec<u8>) -> EpmdReq {
+
+    // parser's little helper function :)
+    let parse_u16 = |a:u8, b:u8| -> u16 {
+        u16::from_be(a as u16 | (b as u16) << 8)
+    };
+
+    if mesg.len() < 3 { return EpmdReq::None; }
+
     let (len_v, data ) = mesg.split_at(2);
-    let len = u16::from_be(len_v[0] as u16 + (len_v[1] as u16) << 8);
-    let (req, data ) = data.split_at(1);
+    let (req, data )   = data.split_at(1);
+
+    let len = parse_u16(len_v[0], len_v[1]);
+
     match req[0] {
         120 => {
-            let port = u16::from_be(data[0] as u16 + (data[1] as u16) << 8);
-            let node_type = data[3];
-            let protocol = data[4];
-            let high_ver = u16::from_be(data[5] as u16 + (data[6] as u16) << 8);
-            let name_len = u16::from_be(data[5] as u16 + (data[6] as u16) << 8);
-            let (len, data) = data.split_at(7);
-            let name_len = u16::from_be(len[0] as u16 + (data[1] as u16) << 8);
-            let (_name, data) = data.split_at(name_len as usize);
-            let name = from_utf8(_name).unwrap_or("INVALID_NAME");
-            let (len, extra) = data.split_at(2);
-            EpmdReq::Alive2(port, node_type, protocol,
-                            high_ver, name.to_string(), extra.to_owned())
+            if data.len() < 12 { /* min data: 2+1+1+2+2+2+0+2+0 = 12 bytes */
+                EpmdReq::None
+            } else {
+                // start fixed-len header
+                let port      = parse_u16(data[0], data[1]);
+                let node_type = data[2];
+                let protocol  = data[3];
+                let high_ver  = parse_u16(data[4], data[5]);
+                let low_ver   = parse_u16(data[6], data[7]);
+                // end fixed-len header
+                let (_done, data) = data.split_at(8);
+                let (len,   data) = data.split_at(2);
+                // parse name with bound check
+                let _nlen    = parse_u16(data[0], data[1]);
+                let name_len = if _nlen as usize > (data.len() - 2) {
+                    data.len() as u16 - 2
+                } else {
+                    _nlen
+                };
+                let (_name, data) = data.split_at(name_len as usize);
+                let name = from_utf8(_name).unwrap_or("INVALID_NAME");
+                // parse Extra
+                let (ex_len, extra) = data.split_at(2);
+
+                EpmdReq::Alive2(port, node_type, protocol, high_ver,
+                                low_ver, name.to_string(), extra.to_owned())
             }
+        }
         122 => {
-            let name = from_utf8(data).unwrap_or("INVALID");
-            EpmdReq::Port2(name.to_string())
+            match from_utf8(data) {
+                Ok(name) => EpmdReq::Port2(name.to_string()),
+                Err(_)   => EpmdReq::None
             }
+        }
         110 => EpmdReq::Names,
         100 => EpmdReq::Dump,
         107 => EpmdReq::Kill,
-        115 => EpmdReq::Stop("STOPPED".to_string()),
+        115 => {
+            match from_utf8(data) {
+                Ok(name) => EpmdReq::Stop(name.to_string()),
+                Err(_)   => EpmdReq::None
+            }
+        }
         _ => EpmdReq::None
     }
 }
 
-fn do_request(epmd: &mut Epmd, request: Vec<u8>) -> Vec<u8> /* response */ {
-    vec![0,1,2,3]
+fn do_request(epmd: &mut Epmd, req: EpmdReq) -> EpmdResp {
+    match req {
+        EpmdReq::None => EpmdResp::None,
+        EpmdReq::Alive2(port, n_type, protocol, h_ver, l_ver, name, extra) => {
+            EpmdResp::None
+        }
+        EpmdReq::Port2(name) => {
+            EpmdResp::None
+        },
+        EpmdReq::Names => {
+            EpmdResp::None
+        },
+        EpmdReq::Dump => {
+            EpmdResp::None
+        },
+        EpmdReq::Kill => {
+            EpmdResp::None
+        },
+        EpmdReq::Stop(name) => {
+            EpmdResp::None
+        },
+    }
 }
 
 fn kill (epmd: &mut Epmd) {

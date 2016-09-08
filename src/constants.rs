@@ -49,24 +49,25 @@ const EPMD_NODE_TYPE: u16  = 110;
 // mentioned capabilities they can handle.
 // Distribution format 5 contains the new md5 based handshake.
 
-const EPMD_DIST_LOW:  u16 = 5;
-const EPMD_DIST_HIGH: u16 = 5;
+const DIST_LOW:  u16 = 5;
+const DIST_HIGH: u16 = 5;
 
 // from /erts/epmd/src/epmd.h
 
 /* Definitions of message codes */
 
 /* Registration and queries */
-const EPMD_ALIVE2_RESP: u8 = 121; // 'y'
-const EPMD_ALIVE2_REQ: u8  = 120; // 'x'
-const EPMD_PORT2_RESP: u8  = 119; // 'w'
-const EPMD_PORT2_REQ: u8   = 122; // 'z'
-const EPMD_NAMES_REQ: u8   = 110; // 'n'
+const ALIVE2_REQ:  u8 = 120; // 'x'
+const PORT2_REQ:   u8 = 122; // 'z'
+const NAMES_REQ:   u8 = 110; // 'n'
+
+pub const ALIVE2_RESP: u8 = 121; // 'y'
+pub const PORT2_RESP:  u8 = 119; // 'w'
 
 /* Interactive client command codes */
-const EPMD_DUMP_REQ: u8 = 100; // 'd'
-const EPMD_KILL_REQ: u8 = 107; // 'k'
-const EPMD_STOP_REQ: u8 = 115; // 's'
+const DUMP_REQ: u8 = 100; // 'd'
+const KILL_REQ: u8 = 107; // 'k'
+const STOP_REQ: u8 = 115; // 's'
 
 // from /erts/epmd/src/epmd_int.h
 // `-> (at least selection from here...)

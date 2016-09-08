@@ -58,7 +58,7 @@ impl Connection {
 
         // Error Checking - Correct Length
         let len = if vec.len() >= 2 {
-            u16::from_be(vec[0] as u16 + (vec[1] as u16) << 8)
+            u16::from_be(vec[0] as u16 | (vec[1] as u16) << 8)
         } else {
             println!("Received packet too short... :(");
             0
