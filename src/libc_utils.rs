@@ -4,9 +4,19 @@ use std::io::Error;
 use std::io::Result;
 
 use libc::{self, c_int, fd_set, signal, timeval, select as __select,
+           clock_gettime, timespec, CLOCK_MONOTONIC,
            SIGPIPE, SIG_IGN, FD_ZERO, FD_ISSET, FD_SET};
 
 use constants::IDLE_TIMEOUT;
+
+/// Generates a random number between 1 and 3
+pub fn rand_1_3() -> u16 {
+    unsafe {
+        let mut time = timespec { tv_sec: IDLE_TIMEOUT, tv_nsec: 0 };
+        clock_gettime(CLOCK_MONOTONIC, &mut time);
+        ( time.tv_sec % 3 ) as u16 + 1
+    }
+}
 
 /// Ignore the SIGPIPE signal that is raised when we call write
 /// twice on a socket closed by the other end.

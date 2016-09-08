@@ -128,6 +128,7 @@ impl EpmdConfig {
 }
 
 pub struct Epmd {
+    // -- program data --
     pub active_conn: usize,
     pub max_conn: usize,
     pub nodes: HashSet<ErlNode>,
@@ -407,8 +408,16 @@ fn parse_request(mesg: Vec<u8>) -> EpmdReq {
 fn do_request(epmd: &mut Epmd, req: EpmdReq) -> EpmdResp {
     match req {
         EpmdReq::None => EpmdResp::None,
-        EpmdReq::Alive2(port, n_type, protocol, h_ver, l_ver, name, extra) => {
-            EpmdResp::None
+        EpmdReq::Alive2(port, n_type, proto, h_ver, l_ver, name, extra) => {
+            let node =
+                ErlNode::new(port, n_type, proto, h_ver, l_ver, name, extra);
+            let creation = node.creation;
+            match epmd.nodes.replace(node) {
+                Some( _ ) => { /* have an old entry here;
+                                  TODO: manage reused nodes. */ },
+                None      => { /* New entry so nothing to replace */ }
+            }
+            EpmdResp::Alive2(0 /* OK */, creation)
         }
         EpmdReq::Port2(name) => {
             EpmdResp::None
