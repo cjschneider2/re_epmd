@@ -267,11 +267,13 @@ pub fn run (
                     _ => {
                         let resp_data = serialize_response(response);
                         conn.write(resp_data);
+                        conn.keep = false; //DEBUG
+                        conn.open = false; //DEBUG
                     }
-
                 }
             } else if !conn.keep && has_timed_out {
                 conn.close();
+                println!("Dropping connection: {:?}", conn);
             }
         }
         connections.retain(|conn| conn.keep);
@@ -509,7 +511,8 @@ fn parse_socket_addrs (
             .collect();
         socket_addrs.append(&mut addrs);
     } else { // just listen on any address...
-        socket_addrs.push(get_any_address(port, use_ipv6));
+        //socket_addrs.push(get_any_address(port, use_ipv6));
+        socket_addrs.push(get_loopback_address(port, use_ipv6));
     }
     socket_addrs
 }

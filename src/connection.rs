@@ -7,12 +7,14 @@ use std::io::{Write};
 
 use constants::INBUF_SIZE;
 
+#[derive(Debug)]
 enum Status {
     Idle,
     NeedData,
     NeedResp,
 }
 
+#[derive(Debug)]
 pub struct Connection {
     pub open: bool,	// `true` if open
     pub keep: bool,	// Don't close when sent reply
