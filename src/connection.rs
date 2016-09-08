@@ -3,6 +3,7 @@
 use std::time::{Instant, Duration};
 use std::net::{IpAddr, TcpStream, SocketAddr};
 use std::io::{Read, BufReader};
+use std::io::{Write};
 
 use constants::INBUF_SIZE;
 
@@ -27,7 +28,7 @@ impl Connection {
     pub fn new (
         stream: TcpStream,
         peer_addr: SocketAddr,
-        timeout: Duration,
+        timeout: Duration
     ) -> Connection {
         // TODO: Error handling...
         let _ = stream.set_read_timeout(Some(timeout));
@@ -45,7 +46,8 @@ impl Connection {
         }
     }
 
-    pub fn do_read(&mut self) -> Vec<u8> {
+    /// Reads raw data off of the stream
+    pub fn read(&mut self) -> Vec<u8> {
         let mut buf = [0; INBUF_SIZE];
         let bytes_recv = match self.read_buffer.read(&mut buf) {
             Ok(size) => size,
@@ -68,11 +70,13 @@ impl Connection {
         vec
     }
 
-    pub fn do_write(&self, response: Vec<u8>) {
-        let _ = response;
-        unimplemented!();
+    /// Sends raw data to the remote connection
+    pub fn write(&mut self, response: Vec<u8>) {
+        let _ = self.stream.write_all(&response);
+        let _ = self.stream.flush();
     }
 
+    /// Signals that the Connection should be dropped
     pub fn close(&mut self) {
         self.keep = false;
     }

@@ -214,25 +214,20 @@ pub fn run (
     //    trying to connect or we've run out of our allowance of
     //    connection sockets.
     //  * For all of our connection objects:
-    //    * if we have an open connection then try to `do_read()` on
-    //      the socket to communicate with the client.
+    //    * if we have an open connection then try to `read()` on
+    //      the socket to get data from the client / send a response.
     //    * or if the connection should be shutdown we'll kill and free the
     //      connection; this can be due to a timeout or the client closing
     //      the connection.
-    //let nodes = HashSet::<ErlNode>::new();
     let mut connections = Vec::<Connection>::new();
     loop {
         let now = Instant::now();
         let read_mask = select.fd_set.clone();
 
-        println!("before do_select()");
-
         let events = select.select(read_mask).expect("Select()");
         if events == 0 {
             select.zero_set();
         }
-
-        println!("got {} events", events);
 
         for sock in listeners.iter() {
             let fd = get_raw_fd(sock);
@@ -262,15 +257,16 @@ pub fn run (
         for mut conn in &mut connections {
             let has_timed_out = conn.mod_time + config.packet_timeout < now;
             if conn.open == true {
-                let mesg = conn.do_read();
+                let mesg = conn.read();
                 let request = parse_request(mesg);
                 println!("Got request: {:?}", request);
-                let response = do_request(&mut epmd, request);
+                let response = process_request(&mut epmd, request);
+                println!("Sending response: {:?}", response);
                 match response {
                     EpmdResp::None => {},
                     _ => {
                         let resp_data = serialize_response(response);
-                        conn.do_write(resp_data);
+                        conn.write(resp_data);
                     }
 
                 }
@@ -405,7 +401,7 @@ fn parse_request(mesg: Vec<u8>) -> EpmdReq {
     }
 }
 
-fn do_request(epmd: &mut Epmd, req: EpmdReq) -> EpmdResp {
+fn process_request(epmd: &mut Epmd, req: EpmdReq) -> EpmdResp {
     match req {
         EpmdReq::None => EpmdResp::None,
         EpmdReq::Alive2(port, n_type, proto, h_ver, l_ver, name, extra) => {
