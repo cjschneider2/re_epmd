@@ -13,6 +13,9 @@ use std::collections::HashSet;
 use std::mem::zeroed;
 use std::thread::sleep;
 use std::str::from_utf8;
+use std::net::Shutdown;
+#[cfg(any(unix))]
+use std::os::unix::io::AsRawFd;
 
 use net2::TcpBuilder;
 use net2::TcpListenerExt;
@@ -39,7 +42,7 @@ pub enum EpmdReq {
     Stop(String) // Name
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum EpmdResp {
     None,
     Alive2(u8, u16), // Result, Creation
@@ -79,7 +82,7 @@ impl Select {
         libc_utils::select(&mut set, self.fd_top, )
     }
 
-    fn set_fd(&mut self, sock: &TcpListener) {
+    fn set_fd<T: AsRawFd>(&mut self, sock: &T) {
         let fd = get_raw_fd(sock) as libc::c_int;
         libc_utils::select_fd_set(&mut self.fd_set, fd);
         if fd >= self.fd_top {
@@ -194,13 +197,12 @@ pub fn run (
     // configure sockets for select()
     let mut select = Select::new();
     for sock in listeners.iter() {
-        println!("creating set_fd for {:?}", sock);
+        println!("DEBUG: Creating set_fd for {:?}", sock);
         select.set_fd(sock);
         sock.set_nonblocking(true).expect("sock.set_nonblocking()");
     }
 
-    // DEBUG
-    println!("Connected on the following Sockets:");
+    println!("DEBUG: Connected on the following Sockets:");
     for sock in listeners.iter() {
         println!("\t{:?}", sock);
     }
@@ -235,6 +237,7 @@ pub fn run (
                 match sock.accept() {
                     Ok((stream, peer_addr)) => {
                         let timeout = Duration::new(0, 500_000_000); // 0.5 sec
+                        select.set_fd(&stream.try_clone().expect("try_clone"));
                         let conn = Connection::new(stream, peer_addr, timeout);
                         connections.push(conn);
                         println!("Created new connection object");
@@ -259,23 +262,23 @@ pub fn run (
             if conn.open == true {
                 let mesg = conn.read();
                 let request = parse_request(mesg);
-                println!("Got request: {:?}", request);
+                println!("DEBUG: Got request: {:?}", request);
                 let response = process_request(&mut epmd, request);
-                println!("Sending response: {:?}", response);
-                match response {
-                    EpmdResp::None => {},
-                    _ => {
-                        let resp_data = serialize_response(response);
-                        conn.write(resp_data);
-                        conn.keep = false; //DEBUG
-                        conn.open = false; //DEBUG
-                    }
+                println!("DEBUG: Sending response: {:?}", response);
+                if response != EpmdResp::None {
+                    println!("Sending response: {:?}", response);
+                    let resp_data = serialize_response(response);
+                    conn.write(resp_data);
+                    conn.stream.shutdown(Shutdown::Both);
+                    conn.keep = false; //DEBUG
+                    conn.open = false; //DEBUG
                 }
             } else if !conn.keep && has_timed_out {
                 conn.close();
-                println!("Dropping connection: {:?}", conn);
+                println!("DEBUG: Dropping connection: {:?}", conn);
             }
         }
+        // Remove connection we don't want to keep
         connections.retain(|conn| conn.keep);
     }
 }
@@ -342,7 +345,6 @@ fn serialize_response(resp: EpmdResp) -> Vec<u8> {
 
 fn parse_request(mesg: Vec<u8>) -> EpmdReq {
 
-    // parser's little helper function :)
     let parse_u16 = |a:u8, b:u8| -> u16 {
         u16::from_be(a as u16 | (b as u16) << 8)
     };
@@ -446,13 +448,12 @@ fn call (epmd: &mut Epmd) {
 }
 
 #[cfg(target_os = "windows")]
-fn get_raw_fd(listener: TcpListener) -> libc::c_int {
-    listener.as_raw_socket() as libc::c_int
+fn get_raw_fd<T: AsRawSock>(sock: &T) -> libc::c_int {
+    sock.as_raw_socket() as libc::c_int
 }
 #[cfg(any(unix))]
-fn get_raw_fd(listener: &TcpListener) -> libc::c_int {
-    use std::os::unix::io::AsRawFd;
-    listener.as_raw_fd() as libc::c_int
+fn get_raw_fd<T: AsRawFd>(sock: &T) -> libc::c_int {
+    sock.as_raw_fd() as libc::c_int
 }
 
 

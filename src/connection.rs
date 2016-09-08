@@ -19,7 +19,7 @@ pub struct Connection {
     pub open: bool,	// `true` if open
     pub keep: bool,	// Don't close when sent reply
     pub mod_time: Instant, // Last activity on this socket
-    stream: TcpStream, // TCP connection stream
+    pub stream: TcpStream, // TCP connection stream
     peer_addr: SocketAddr, // Remote peer's socket address
     local_peer: bool, // This connection is via a local/loopback interface
     read_buffer: BufReader<TcpStream>,	// The remaining buffer
