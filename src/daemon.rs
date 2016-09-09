@@ -118,7 +118,7 @@ pub fn run_daemon_unix (epmd: Epmd, config: EpmdConfig) {
         *errno = 0;
     }
 
-    epmd::run(epmd, config, None);
+    epmd::run(epmd, config);
 }
 
 // TODO: Write the windows version of this function

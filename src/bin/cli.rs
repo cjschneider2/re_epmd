@@ -2,7 +2,10 @@ extern crate re_epmd as epmd;
 
 use epmd::{parse_args, display_usage};
 use epmd::{run_console, run_daemon};
-use epmd::{ParseResponse as PR, EpmdReq as REQ};
+use epmd::{
+    ParseResponse as PR,
+    //EpmdReq as REQ
+};
 
 fn main () {
     let epmd = epmd::Epmd::new();
@@ -12,22 +15,27 @@ fn main () {
         check_wsa_version();
     }
 
-    let mut with_request: Option<REQ> = None;
+    //let with_request: Option<REQ> = None;
     match parse_args(&mut config) {
         PR::Ok         => {},
         PR::ShouldExit => { return; },
         PR::BadOpt     => { display_usage(); return; },
-        PR::Call(req)  => { with_request = Some(req)}
+        PR::Call(_req)  => { /*with_request = Some(req)*/ }
     }
 
     /* TODO: Check max file descriptors for system
     See the note @ constants::MAX_FILE_DESCRIPTORS;
      */
 
+    // TODO:
+    // When the users wants to have a call, such as kill or so, the
+    // client needs to connect with the existing epmd daemon and send
+    // the command packet to the epmd and process the response and exit
+
     if config.is_daemon {
         run_daemon(epmd, config);
     } else {
-        run_console(epmd, config, with_request);
+        run_console(epmd, config);
     }
 }
 

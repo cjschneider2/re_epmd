@@ -3,9 +3,15 @@ use std::mem;
 use std::io::Error;
 use std::io::Result;
 
-use libc::{self, c_int, fd_set, signal, timeval, select as __select,
-           clock_gettime, timespec, CLOCK_MONOTONIC,
-           SIGPIPE, SIG_IGN, FD_ZERO, FD_ISSET, FD_SET};
+use libc::{
+    self,
+    c_int,
+    fd_set, select as __select,
+    FD_ZERO, FD_ISSET, FD_SET, FD_CLR,
+    signal,
+    timeval, clock_gettime, timespec,
+    CLOCK_MONOTONIC, SIGPIPE, SIG_IGN,
+};
 
 use constants::IDLE_TIMEOUT;
 
@@ -47,12 +53,16 @@ pub fn select_fd_set( set: &mut fd_set, fd: c_int) {
     unsafe { FD_SET(fd, set); }
 }
 
+pub fn select_fd_clr( set: &mut fd_set, fd: c_int) {
+    unsafe { FD_CLR(fd, set); }
+}
+
 pub fn select ( set: &mut fd_set, fd_top: c_int ) -> Result<usize> {
     let mut timeout = timeval { tv_sec: IDLE_TIMEOUT, tv_usec: 0 };
     let events = unsafe {
         __select(
             fd_top,
-            set,        /* read  fds */
+            set,             /* read  fds */
             ptr::null_mut(), /* write fds */
             ptr::null_mut(), /* error fds */
             &mut timeout)

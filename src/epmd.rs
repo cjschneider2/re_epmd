@@ -1,34 +1,27 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-
 /// Citations:
 /// [1]: https://msdn.microsoft.com/en-us/library/windows/desktop/ms741563.aspx
 /// [2]: https://lists.fedoraproject.org/pipermail/devel/2010-July/139135.html
 
-use std::io::{Read, Result, ErrorKind, Error};
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::net::{TcpListener, ToSocketAddrs};
+use std::io::{Result, ErrorKind};
 use std::time::{Duration, Instant};
 use std::collections::HashSet;
-use std::mem::zeroed;
-use std::thread::sleep;
 use std::str::from_utf8;
 use std::net::Shutdown;
 #[cfg(any(unix))]
 use std::os::unix::io::AsRawFd;
 
-use net2::TcpBuilder;
-use net2::TcpListenerExt;
-use net2::unix::UnixTcpBuilderExt;
-
 use libc;
 
-use super::run_daemon;
 use connection::Connection;
-use constants::{MAX_LISTEN_SOCKETS, CLOSE_TIMEOUT, MAX_FILE_DESCRIPTORS};
-use constants::{IPV6_ONLY, ALIVE2_RESP, PORT2_RESP};
+use constants::{
+    MAX_LISTEN_SOCKETS, CLOSE_TIMEOUT, MAX_FILE_DESCRIPTORS,
+    ALIVE2_RESP, PORT2_RESP
+};
 use erl_node::ErlNode;
 use libc_utils;
+use socket::{
+    parse_socket_addrs, create_listen_sockets, get_address, get_port_number
+};
 
 #[derive(Debug)]
 pub enum EpmdReq {
@@ -43,6 +36,7 @@ pub enum EpmdReq {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum EpmdResp {
     None,
     Alive2(u8, u16), // Result, Creation
@@ -79,7 +73,7 @@ impl Select {
     }
 
     fn select(&self, mut set: libc::fd_set) -> Result<usize> {
-        libc_utils::select(&mut set, self.fd_top, )
+        libc_utils::select(&mut set, self.fd_top)
     }
 
     fn set_fd<T: AsRawFd>(&mut self, sock: &T) {
@@ -89,7 +83,14 @@ impl Select {
             self.fd_top = fd + 1;
         }
     }
+
+    fn clr_fd<T: AsRawFd>(&mut self, sock: &T) {
+        let fd = get_raw_fd(sock) as libc::c_int;
+        libc_utils::select_fd_clr(&mut self.fd_set, fd);
+    }
 }
+
+
 
 pub struct EpmdConfig {
     // -- program flags --
@@ -130,18 +131,13 @@ impl EpmdConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct Epmd {
     // -- program data --
     pub active_conn: usize,
     pub max_conn: usize,
     pub nodes: HashSet<ErlNode>,
 }
-
-
-#[cfg(target_pointer_width = "32")]
-const POINTER_BITS:usize = 32;
-#[cfg(target_pointer_width = "64")]
-const POINTER_BITS:usize = 64;
 
 impl Epmd {
     pub fn new () -> Epmd {
@@ -157,7 +153,6 @@ impl Epmd {
 pub fn run (
     mut epmd: Epmd,
     config: EpmdConfig,
-    with_request: Option<EpmdReq>
 ) {
     println!("");
     /* TODO: systemd related initialization...
@@ -224,11 +219,14 @@ pub fn run (
     let mut connections = Vec::<Connection>::new();
     loop {
         let now = Instant::now();
-        let read_mask = select.fd_set.clone();
+        let mut read_mask = select.fd_set.clone();
 
-        let events = select.select(read_mask).expect("Select()");
+        println!("DEBUG: {:?}", connections);
+        println!("DEBUG: {:?}", epmd);
+
+        let events = select.select(read_mask).expect("Main loop Select()");
         if events == 0 {
-            select.zero_set();
+            libc_utils::select_zero_set(&mut read_mask);
         }
 
         for sock in listeners.iter() {
@@ -236,11 +234,13 @@ pub fn run (
             if select.check(fd) {
                 match sock.accept() {
                     Ok((stream, peer_addr)) => {
+                        println!("DEBUG: Creating new connection object");
+                        println!("DEBUG: stream:    {:?}", stream);
+                        println!("DEBUG: peer_addr: {:?}", peer_addr);
                         let timeout = Duration::new(0, 500_000_000); // 0.5 sec
-                        select.set_fd(&stream.try_clone().expect("try_clone"));
+                        select.set_fd(&stream);
                         let conn = Connection::new(stream, peer_addr, timeout);
                         connections.push(conn);
-                        println!("Created new connection object");
                     }
                     Err(err) => {
                         match err.kind() {
@@ -260,32 +260,29 @@ pub fn run (
         for mut conn in &mut connections {
             let has_timed_out = conn.mod_time + config.packet_timeout < now;
             if conn.open == true {
-                let mesg = conn.read();
-                let request = parse_request(mesg);
-                println!("DEBUG: Got request: {:?}", request);
-                let response = process_request(&mut epmd, request);
-                println!("DEBUG: Sending response: {:?}", response);
-                if response != EpmdResp::None {
-                    println!("Sending response: {:?}", response);
-                    let resp_data = serialize_response(response);
-                    conn.write(resp_data);
+                let fd = get_raw_fd(&conn.stream);
+                let is_set = libc_utils::select_is_set(&mut read_mask, fd);
+                if is_set {
+                    let mesg = conn.read();
+                    let request = parse_request(mesg);
+                    println!("DEBUG: Got request: {:?}", request);
+                    let response = process_request(&mut epmd, request);
+                    if response != EpmdResp::None {
+                        println!("DEBUG: Sending response: {:?}", response);
+                        let resp_data = serialize_response(response);
+                        conn.write(resp_data);
+                    }
+                } else if !conn.keep && has_timed_out {
+                    println!("DEBUG: Dropping connection: {:?}", conn);
+                    conn.close();
+                    select.clr_fd(&conn.stream);
                     conn.stream.shutdown(Shutdown::Both);
-                    conn.keep = false; //DEBUG
-                    conn.open = false; //DEBUG
                 }
-            } else if !conn.keep && has_timed_out {
-                conn.close();
-                println!("DEBUG: Dropping connection: {:?}", conn);
             }
         }
         // Remove connection we don't want to keep
-        connections.retain(|conn| conn.keep);
+        connections.retain(|conn| !conn.can_remove);
     }
-}
-
-pub fn stop(epmd: &mut Epmd, val: String) {
-    val.len();
-    unimplemented!();
 }
 
 fn serialize_response(resp: EpmdResp) -> Vec<u8> {
@@ -336,10 +333,10 @@ fn serialize_response(resp: EpmdResp) -> Vec<u8> {
             resp.extend_from_slice(&name_list.into_bytes());
             resp
         }
-        EpmdResp::KillErr(s) => { vec![] },
-        EpmdResp::KillOk(s)  => { vec![79, 75] /* "OK" */ },
-        EpmdResp::StopErr(s) => { vec![78, 79, 69, 88, 73, 83, 84] }, //"NOEXIST"
-        EpmdResp::StopOk(s)  => { vec![83, 84, 79, 80, 80, 69, 68] }, //"STOPPED"
+        EpmdResp::KillErr(_) => { vec![] },
+        EpmdResp::KillOk(_)  => { vec![79, 75] /* "OK" */ },
+        EpmdResp::StopErr(_) => { vec![78, 79, 69, 88, 73, 83, 84] }, //"NOEXIST"
+        EpmdResp::StopOk(_)  => { vec![83, 84, 79, 80, 80, 69, 68] }, //"STOPPED"
     }
 }
 
@@ -354,7 +351,7 @@ fn parse_request(mesg: Vec<u8>) -> EpmdReq {
     let (len_v, data ) = mesg.split_at(2);
     let (req, data )   = data.split_at(1);
 
-    let len = parse_u16(len_v[0], len_v[1]);
+    let _len = parse_u16(len_v[0], len_v[1]);
 
     match req[0] {
         120 => {
@@ -371,7 +368,7 @@ fn parse_request(mesg: Vec<u8>) -> EpmdReq {
                 let (_done, data) = data.split_at(8);
                 let (len,   data) = data.split_at(2);
                 // parse name with bound check
-                let _nlen    = parse_u16(data[0], data[1]);
+                let _nlen    = parse_u16(len[0], len[1]);
                 let name_len = if _nlen as usize > (data.len() - 2) {
                     data.len() as u16 - 2
                 } else {
@@ -380,7 +377,7 @@ fn parse_request(mesg: Vec<u8>) -> EpmdReq {
                 let (_name, data) = data.split_at(name_len as usize);
                 let name = from_utf8(_name).unwrap_or("INVALID_NAME");
                 // parse Extra
-                let (ex_len, extra) = data.split_at(2);
+                let (_elen, extra) = data.split_at(2);
 
                 EpmdReq::Alive2(port, node_type, protocol, high_ver,
                                 low_ver, name.to_string(), extra.to_owned())
@@ -420,6 +417,7 @@ fn process_request(epmd: &mut Epmd, req: EpmdReq) -> EpmdResp {
             EpmdResp::Alive2(0 /* OK */, creation)
         }
         EpmdReq::Port2(name) => {
+            let _ = name;
             EpmdResp::None
         },
         EpmdReq::Names => {
@@ -432,19 +430,10 @@ fn process_request(epmd: &mut Epmd, req: EpmdReq) -> EpmdResp {
             EpmdResp::None
         },
         EpmdReq::Stop(name) => {
+            let _ = name;
             EpmdResp::None
         },
     }
-}
-
-fn kill (epmd: &mut Epmd) {
-    println!("TODO: epmd.kill()");
-    unimplemented!();
-}
-
-fn call (epmd: &mut Epmd) {
-    println!("TODO: epmd.call()");
-    unimplemented!();
 }
 
 #[cfg(target_os = "windows")]
@@ -456,127 +445,14 @@ fn get_raw_fd<T: AsRawFd>(sock: &T) -> libc::c_int {
     sock.as_raw_fd() as libc::c_int
 }
 
-
-/// Creates a list of listening sockets from which we can call select on and
-/// check for incoming connections.
-// TODO:
-//  * Catch errors we throw away through the `let _ = Result<()>` statements.
-fn create_listen_sockets (in_socks: Vec<SocketAddr>) -> Vec<TcpListener> {
-    let sockets =
-        in_socks.iter()
-        .filter_map(|sock| {
-            let builder = match sock.ip() {
-                IpAddr::V4(..) => TcpBuilder::new_v4(),
-                IpAddr::V6(..) => TcpBuilder::new_v6(),
-            };
-            match builder {
-                Ok(b) => { let _ = b.bind(sock); Some(b) },
-                Err(e) => None,
-            }
-        })
-        .map(|b| { let _ = b.reuse_address(true); b })
-        .map(|b| { if IPV6_ONLY { let _ = b.only_v6(true); } b })
-        .filter_map(|b| b.listen(0).ok())
-        .collect();
-    sockets
-}
-
-/// `parse_socket_addrs` assumes that the addresses are given in the forms of:
-///    "192.168.1.1"
-///    "192.168.1.1, 10.0.0.1"
-///    "192.168.1.1 10.0.0.1"
-/// or their ipv6 counterparts and sets the listen port to the parameter value.
-fn parse_socket_addrs (
-    addr_str: &str, port: u16, use_ipv6: bool
-) -> Vec<SocketAddr> {
-    let mut socket_addrs: Vec<SocketAddr> = Vec::new();
-    // If we have an address list then we'll use it;
-    if !addr_str.is_empty() {
-        // Always join the loopback address
-        socket_addrs.push(get_loopback_address(port, use_ipv6));
-        // Parse the rest of the addresses given to us in the configuration
-        let mut addrs: Vec<_> =
-            addr_str
-            .split(|c| c == ',' || c == ' ')
-            .filter_map(|addr| {
-                if let Ok(_a) = addr.parse::<Ipv4Addr>() {
-                    let _v4 = SocketAddrV4::new(_a, port);
-                    Some(SocketAddr::V4(_v4))
-                } else if let Ok(_a) = addr.parse::<Ipv6Addr>() {
-                    let _v6 = SocketAddrV6::new(_a, port, 0, 0);
-                    Some(SocketAddr::V6(_v6))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        socket_addrs.append(&mut addrs);
-    } else { // just listen on any address...
-        //socket_addrs.push(get_any_address(port, use_ipv6));
-        socket_addrs.push(get_loopback_address(port, use_ipv6));
-    }
-    socket_addrs
-}
-
-fn get_loopback_address(port: u16, use_ipv6: bool) -> SocketAddr {
-    if use_ipv6 {
-        let _v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
-        let _v6 = SocketAddrV6::new(_v6, port, 0, 0);
-        SocketAddr::V6(_v6)
-    } else {
-        let _v4 = Ipv4Addr::new(127, 0, 0, 1);
-        let _v4 = SocketAddrV4::new(_v4, port);
-        SocketAddr::V4(_v4)
-    }
-}
-
-fn get_any_address(port: u16, use_ipv6: bool) -> SocketAddr {
-    if use_ipv6 {
-        let _v6 = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
-        let _v6 = SocketAddrV6::new(_v6, port, 0, 0);
-        SocketAddr::V6(_v6)
-    } else {
-        let _v4 = Ipv4Addr::new(0, 0, 0, 0);
-        let _v4 = SocketAddrV4::new(_v4, port);
-        SocketAddr::V4(_v4)
-    }
-}
-
-fn get_address() -> String {
-    use std::env::var;
-    var("ERL_EPMD_ADDRESS").unwrap_or("".into())
-}
-
-fn get_port_number() -> u16 {
-    use std::env::var;
-    use constants::EPMD_PORT_NUMBER;
-    match var("ERL_EPMD_PORT") {
-        Ok(val) => {
-            match u16::from_str_radix(&val, 10) {
-                Ok(val) => val,
-                Err(_) => EPMD_PORT_NUMBER
-            }
-        },
-        Err(_) => EPMD_PORT_NUMBER
-    }
-}
-
-fn check_relaxed() -> bool {
-    use std::env::var;
-    match var("ERL_EPMD_RELAXED_COMMAND_CHECK") {
-        Ok(_)  => true,
-        Err(_) => false
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
     use std::net::{Ipv6Addr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-    use super::parse_socket_addrs;
-    use super::get_any_address;
-    use super::get_loopback_address;
+    use socket::parse_socket_addrs;
+    use socket::get_any_address;
+    use socket::get_loopback_address;
 
     #[test]
     fn test_parse_socket_addrs_blank () {

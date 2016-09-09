@@ -9,6 +9,7 @@ mod erl_node;
 mod daemon;
 mod parse_args;
 mod libc_utils;
+mod socket;
 
 pub use usage::display_usage;
 pub use parse_args::parse_args;
@@ -19,9 +20,10 @@ pub use epmd::Epmd;
 pub use epmd::EpmdConfig;
 
 pub fn run_console (
-    epmd: Epmd, config: EpmdConfig, with_request: Option<EpmdReq>
+    epmd: Epmd,
+    config: EpmdConfig,
 ) {
-    epmd::run(epmd, config, with_request);
+    epmd::run(epmd, config);
 }
 
 #[cfg(unix)]
@@ -31,5 +33,14 @@ pub fn run_daemon(epmd: Epmd, config: EpmdConfig) {
 #[cfg(windows)]
 pub fn run_daemon() {
     daemon::run_daemon_win();
+}
+
+#[allow(dead_code)]
+fn check_relaxed() -> bool {
+    use std::env::var;
+    match var("ERL_EPMD_RELAXED_COMMAND_CHECK") {
+        Ok(_)  => true,
+        Err(_) => false
+    }
 }
 
